@@ -10,6 +10,7 @@ from typing import Tuple, List, Dict, Any
 import os
 import sys
 from huggingface_hub import hf_hub_download
+import requests
 
 # Set page config with transparent background
 st.set_page_config(
@@ -159,7 +160,7 @@ def load_model():
         # Check if model file exists
         if not os.path.exists(model_path):
             st.error(f"Model file not found: {model_path}")
-            st.info("Please make sure the model file is in the same directory as the app.")
+            st.info("Please make sure the model file is downloadable.")
             model_loaded = False
             return None
         
@@ -200,13 +201,26 @@ def load_face_detector():
     """Load OpenCV's Haar cascade for face detection."""
     global face_cascade, face_detector_loaded
     if face_cascade is None:
+        cascade_path = "haarcascade_frontalface_default.xml"
+        if not os.path.exists(cascade_path):
+            url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+            try:
+                response = requests.get(url)
+                response.raise_for_status()
+                with open(cascade_path, 'wb') as f:
+                    f.write(response.content)
+            except Exception as e:
+                st.error(f"Failed to download face detector XML: {str(e)}")
+                face_detector_loaded = False
+                return False
+        
         try:
-            # Load the pre-trained Haar cascade classifier
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            # Load the cascade classifier
+            face_cascade = cv2.CascadeClassifier(cascade_path)
             
             # Check if the cascade was loaded successfully
             if face_cascade.empty():
-                st.error("Failed to load face detector. Make sure OpenCV is installed correctly.")
+                st.error("Failed to load face detector from file.")
                 face_detector_loaded = False
                 return False
             
@@ -227,7 +241,7 @@ def preprocess_image(image: np.ndarray) -> np.ndarray:
     # Add batch dimension
     return np.expand_dims(normalized, axis=0)
 
-def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+def detect_faces(image: np.ndarray, scale_factor: float, min_neighbors: int) -> List[Tuple[int, int, int, int]]:
     """Detect faces in the image using Haar cascade."""
     # Convert to grayscale for face detection
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -235,8 +249,8 @@ def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
     # Detect faces
     faces = face_cascade.detectMultiScale(
         gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
+        scaleFactor=scale_factor,
+        minNeighbors=min_neighbors,
         minSize=(30, 30),
         flags=cv2.CASCADE_SCALE_IMAGE
     )
@@ -348,11 +362,14 @@ class FaceMaskProcessor(VideoProcessorBase):
     """Video processor class for real-time face mask detection."""
     
     def __init__(self, model: Any, target_size: Tuple[int, int] = (640, 480), 
-                 confidence_threshold: float = 0.5, mirror: bool = False):
+                 confidence_threshold: float = 0.5, mirror: bool = False,
+                 scale_factor: float = 1.1, min_neighbors: int = 5):
         self.model = model
         self.target_size = target_size
         self.confidence_threshold = confidence_threshold
         self.mirror = mirror
+        self.scale_factor = scale_factor
+        self.min_neighbors = min_neighbors
         self.frame_count = 0
         self.processing_times = []
         
@@ -373,7 +390,7 @@ class FaceMaskProcessor(VideoProcessorBase):
                 img = cv2.resize(img, self.target_size)
             
             # Detect faces
-            faces = detect_faces(img)
+            faces = detect_faces(img, self.scale_factor, self.min_neighbors)
             
             # Classify each detected face
             detections = classify_faces(img, faces, self.confidence_threshold)
@@ -425,7 +442,7 @@ def main():
             st.write("**Current Directory:**", os.getcwd())
             st.write("**Files in Directory:**")
             for file in os.listdir():
-                if file.endswith(('.h5', '.keras')):
+                if file.endswith(('.h5', '.keras', '.xml')):
                     st.write(f"- {file}")
             
             # Show system information
@@ -517,7 +534,8 @@ def main():
                 key="face-mask-detection",
                 mode=WebRtcMode.SENDRECV,
                 video_processor_factory=lambda: FaceMaskProcessor(
-                    model, (width, height), confidence_threshold, mirror_video
+                    model, (width, height), confidence_threshold, mirror_video,
+                    scale_factor, min_neighbors
                 ),
                 media_stream_constraints={
                     "video": {
