@@ -2,12 +2,13 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-import os
-import sys
-import time
-from typing import Tuple, List, Dict, Any
+import tensorflow as tf
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
+import time
+from typing import Tuple, List, Dict, Any
+import os
+import sys
 
 # Set page config with transparent background
 st.set_page_config(
@@ -127,31 +128,12 @@ st.markdown("""
         .system-info p {
             margin: 0.2rem 0;
         }
-        
-        /* Model info */
-        .model-info {
-            background-color: #2a2a2a;
-            padding: 1rem;
-            border-radius: 0.5rem;
-            margin: 1rem 0;
-            border: 1px solid #444;
-        }
-        
-        /* File uploader styling */
-        .uploadedFile {
-            background-color: #2a2a2a;
-            padding: 1rem;
-            border-radius: 0.5rem;
-            margin: 1rem 0;
-            border: 1px solid #444;
-        }
     </style>
 """, unsafe_allow_html=True)
 
-# Force TensorFlow to use CPU only and disable optimizations that cause segfaults
+# Force TensorFlow to use CPU only to prevent segmentation fault
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "false"
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TensorFlow logging
 
 # Global variables for model and processor
 model = None
@@ -170,16 +152,11 @@ def load_model():
         # Check if model file exists
         if not os.path.exists(model_path):
             st.error(f"Model file not found: {model_path}")
+            st.info("Please make sure the model file is in the same directory as the app.")
             model_loaded = False
             return None
         
         try:
-            # Import TensorFlow inside the function to avoid global import issues
-            import tensorflow as tf
-            
-            # Disable all GPU related operations
-            tf.config.set_visible_devices([], 'GPU')
-            
             # Try loading with different methods
             # Method 1: Standard Keras load
             try:
@@ -243,7 +220,7 @@ def preprocess_image(image: np.ndarray) -> np.ndarray:
     # Add batch dimension
     return np.expand_dims(normalized, axis=0)
 
-def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+def detect_faces(image: np.ndarray, scale_factor: float = 1.1, min_neighbors: int = 5) -> List[Tuple[int, int, int, int]]:
     """Detect faces in the image using Haar cascade."""
     # Convert to grayscale for face detection
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
@@ -251,8 +228,8 @@ def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
     # Detect faces
     faces = face_cascade.detectMultiScale(
         gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
+        scaleFactor=scale_factor,
+        minNeighbors=min_neighbors,
         minSize=(30, 30),
         flags=cv2.CASCADE_SCALE_IMAGE
     )
@@ -364,11 +341,14 @@ class FaceMaskProcessor(VideoProcessorBase):
     """Video processor class for real-time face mask detection."""
     
     def __init__(self, model: Any, target_size: Tuple[int, int] = (640, 480), 
-                 confidence_threshold: float = 0.5, mirror: bool = False):
+                 confidence_threshold: float = 0.5, mirror: bool = False,
+                 scale_factor: float = 1.1, min_neighbors: int = 5):
         self.model = model
         self.target_size = target_size
         self.confidence_threshold = confidence_threshold
         self.mirror = mirror
+        self.scale_factor = scale_factor
+        self.min_neighbors = min_neighbors
         self.frame_count = 0
         self.processing_times = []
         
@@ -389,7 +369,7 @@ class FaceMaskProcessor(VideoProcessorBase):
                 img = cv2.resize(img, self.target_size)
             
             # Detect faces
-            faces = detect_faces(img)
+            faces = detect_faces(img, self.scale_factor, self.min_neighbors)
             
             # Classify each detected face
             detections = classify_faces(img, faces, self.confidence_threshold)
@@ -426,28 +406,41 @@ def main():
         st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
         st.markdown('<p class="description">Real-time face mask detection using a Keras model. The system detects faces and classifies whether they are wearing a mask or not.</p>', unsafe_allow_html=True)
         
+        # Load model and face detector
+        model = load_model()
+        load_face_detector()
+        
+        # Check if models loaded successfully
+        if not model_loaded or not face_detector_loaded:
+            st.error("Failed to load the model or face detector. Please check the files and try again.")
+            
+            # Additional debugging information
+            st.markdown("---")
+            st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
+            
+            st.write("**Current Directory:**", os.getcwd())
+            st.write("**Files in Directory:**")
+            for file in os.listdir():
+                if file.endswith(('.h5', '.keras')):
+                    st.write(f"- {file}")
+            
+            # Show system information
+            st.write("**System Information:**")
+            st.write(f"- Python Version: {sys.version}")
+            st.write(f"- TensorFlow Version: {tf.__version__}")
+            st.write(f"- OpenCV Version: {cv2.__version__}")
+            
+            # Check model file integrity
+            model_path = "mask_detection_model.h5"
+            if os.path.exists(model_path):
+                st.write(f"\n**Model File Information:**")
+                st.write(f"- File size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
+                st.write(f"- File exists: Yes")
+            
+            return
+        
         # Sidebar
         with st.sidebar:
-            st.markdown('<h3 class="sidebar-title">📁 Model Upload</h3>', unsafe_allow_html=True)
-            
-            # Check if model file exists
-            model_path = "mask_detection_model.h5"
-            if not os.path.exists(model_path):
-                st.info("Model file not found. Please upload the model file.")
-                uploaded_file = st.file_uploader("Upload Keras Model (.h5)", type=["h5"])
-                
-                if uploaded_file is not None:
-                    # Save the uploaded file
-                    with open(model_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    st.success("Model file uploaded successfully!")
-                    st.rerun()  # Rerun the app to load the model
-            else:
-                st.success("Model file found!")
-                st.write(f"File: {model_path}")
-                st.write(f"Size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
-            
-            st.markdown("---")
             st.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
             
             # Video size selection
@@ -507,46 +500,8 @@ def main():
                 help="Parameter specifying how many neighbors each candidate rectangle should have to retain it"
             )
         
-        # Load model and face detector
-        model = load_model()
-        load_face_detector()
-        
-        # Check if models loaded successfully
-        if not model_loaded or not face_detector_loaded:
-            st.error("Failed to load the model or face detector. Please check the files and try again.")
-            
-            # Additional debugging information
-            st.markdown("---")
-            st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
-            
-            st.write("**Current Directory:**", os.getcwd())
-            st.write("**Files in Directory:**")
-            for file in os.listdir():
-                if file.endswith(('.h5', '.keras')):
-                    st.write(f"- {file}")
-            
-            # Show system information
-            st.write("**System Information:**")
-            st.write(f"- Python Version: {sys.version}")
-            
-            # Check model file integrity
-            if os.path.exists(model_path):
-                st.write(f"\n**Model File Information:**")
-                st.write(f"- File size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
-                st.write(f"- File exists: Yes")
-            
-            return
-        
-        # Model information
-        st.markdown("""
-            <div class="model-info">
-                <h3>🤖 Model Information</h3>
-                <p><strong>Model:</strong> mask_detection_model.h5</p>
-                <p><strong>Source:</strong> Local File</p>
-                <p><strong>Type:</strong> Image Classification</p>
-                <p><strong>Classes:</strong> Mask, No Mask</p>
-            </div>
-        """, unsafe_allow_html=True)
+        # Parse video size
+        width, height = map(int, video_size.split('x'))
         
         # Main content area
         col1, col2 = st.columns([2, 1])
@@ -559,7 +514,7 @@ def main():
                 key="face-mask-detection",
                 mode=WebRtcMode.SENDRECV,
                 video_processor_factory=lambda: FaceMaskProcessor(
-                    model, (width, height), confidence_threshold, mirror_video
+                    model, (width, height), confidence_threshold, mirror_video, scale_factor, min_neighbors
                 ),
                 media_stream_constraints={
                     "video": {
@@ -569,6 +524,7 @@ def main():
                     },
                     "audio": False
                 },
+                rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
                 async_processing=True,
             )
             
@@ -610,10 +566,12 @@ def main():
         st.markdown("""
             <div class="system-info">
                 <h3>System Information</h3>
+                <p>TensorFlow Version: {tf_version}</p>
                 <p>Model: {model_name} ({model_size:.2f} MB)</p>
                 <p>Face Detector: {detector_status}</p>
             </div>
         """.format(
+            tf_version=tf.__version__,
             model_name="mask_detection_model.h5",
             model_size=os.path.getsize("mask_detection_model.h5") / (1024*1024) if os.path.exists("mask_detection_model.h5") else 0,
             detector_status="Loaded" if face_detector_loaded else "Failed to load"
