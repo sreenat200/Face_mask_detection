@@ -30,6 +30,7 @@ except ImportError as e:
 try:
     import tensorflow as tf
     # Explicitly disable GPU to avoid CUDA issues
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Additional safeguard
     tf.config.set_visible_devices([], 'GPU')
     TENSORFLOW_AVAILABLE = True
 except ImportError as e:
@@ -135,7 +136,6 @@ def load_model():
         st.error(f"❌ Failed to download model: {e}")
         return load_alternative_model()
     
-    # Try different loading methods
     loading_methods = [
         {"name": "Standard load", "kwargs": {}},
         {"name": "Load without compilation", "kwargs": {"compile": False}},
@@ -221,7 +221,7 @@ def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
         st.warning(f"Face detection error: {e}")
         return []
 
-def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], confidence_threshold: float = 0.5) -> List[Dict[any, any]]:
+def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], confidence_threshold: float = 0.5) -> List[Dict[str, Any]]:
     """Classify each detected face as mask or no mask."""
     if not model_loaded:
         detections = []
@@ -252,7 +252,7 @@ def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], co
             st.warning(f"Error classifying face: {str(e)}")
     return detections
 
-def draw_detections(image: np.ndarray, detections: List[Dict[any, any]]) -> np.ndarray:
+def draw_detections(image: np.ndarray, detections: List[Dict[str, Any]]) -> np.ndarray:
     """Draw bounding boxes and labels on the image."""
     try:
         if len(image.shape) == 3 and image.shape[2] == 3:
@@ -328,7 +328,6 @@ def main():
     st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
     st.markdown('<p class="description">Real-time face mask detection using deep learning. Detects faces and classifies mask usage.</p>', unsafe_allow_html=True)
     
-    # Dependency check
     st.sidebar.markdown('<h3 class="sidebar-title">🔧 System Status</h3>', unsafe_allow_html=True)
     status_col1, status_col2 = st.sidebar.columns(2)
     with status_col1:
@@ -341,7 +340,6 @@ def main():
         st.write(f"Face Detector: {'✅' if face_detector_loaded else '❌'}")
         st.write(f"ML Model: {'✅' if model_loaded else '❌'}")
     
-    # Load models
     with st.spinner("Loading models and detectors..."):
         load_face_detector()
         load_model()
@@ -363,7 +361,6 @@ def main():
         - Full functionality requires successful model loading
         """)
     
-    # Settings sidebar
     st.sidebar.markdown("---")
     st.sidebar.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
     video_size = st.sidebar.selectbox("Video Size", options=["640x480", "1280x720", "800x600"], index=0)
@@ -371,7 +368,6 @@ def main():
     mirror_video = st.sidebar.checkbox("Mirror Video", value=True)
     width, height = map(int, video_size.split('x'))
     
-    # Main content
     col1, col2 = st.columns([2, 1])
     with col1:
         st.markdown('<div class="video-container">', unsafe_allow_html=True)
@@ -451,4 +447,8 @@ def main():
                 st.write(f"- {file}")
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        st.error(f"Application crashed: {str(e)}")
+        logger.error(f"Application crashed: {str(e)}", exc_info=True)
