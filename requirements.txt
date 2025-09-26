@@ -7,3 +7,4 @@ numpy>=1.21.0,<1.25.0
 aiortc>=1.5.0
 av>=10.0.0
 protobuf>=3.20.0,<4.0.0
+huggingface_hub
