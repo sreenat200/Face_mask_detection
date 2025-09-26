@@ -213,6 +213,7 @@ def load_model():
         {"name": "Standard load", "kwargs": {}},
         {"name": "Load without compilation", "kwargs": {"compile": False}},
         {"name": "Load with custom objects", "kwargs": {"compile": False, "custom_objects": {}}},
+        {"name": "Load with explicit InputLayer", "kwargs": {"compile": False, "custom_objects": {"InputLayer": tf.keras.layers.InputLayer}}},
     ]
     
     for method in loading_methods:
@@ -236,6 +237,46 @@ def load_model():
             st.warning(f"❌ {method['name']} failed: {str(e)[:100]}...")
             continue
     
+    # Try loading with h5py and manually reconstructing the model
+    try:
+        st.info("🔄 Trying to load model architecture and weights separately...")
+        import h5py
+        
+        # Load the h5 file
+        with h5py.File(model_path, 'r') as f:
+            # Get model config
+            if 'model_config' in f:
+                import json
+                model_config = json.loads(f.attrs['model_config'])
+                
+                # Create model from config
+                try:
+                    model = tf.keras.models.model_from_json(
+                        json.dumps(model_config),
+                        custom_objects={'InputLayer': tf.keras.layers.InputLayer}
+                    )
+                    
+                    # Load weights
+                    model.load_weights(model_path)
+                    model.compile(optimizer='adam', loss='categorical_crossentropy', metrics=['accuracy'])
+                    
+                    model_loaded = True
+                    st.success("✅ Model loaded successfully using architecture and weights!")
+                    
+                    # Test the model
+                    try:
+                        dummy_input = np.random.random((1, *model_input_size, 3)).astype(np.float32)
+                        prediction = model.predict(dummy_input, verbose=0)
+                        st.success("✅ Model test prediction successful!")
+                    except Exception as e:
+                        st.warning(f"⚠️ Model test prediction failed: {e}")
+                        
+                    return model
+                except Exception as e:
+                    st.warning(f"❌ Failed to reconstruct model: {str(e)[:100]}...")
+    except Exception as e:
+        st.warning(f"❌ Failed to load with h5py: {str(e)[:100]}...")
+    
     # If all methods failed, try alternative approach
     st.error("All loading methods failed. Trying alternative approach...")
     return load_alternative_model()
@@ -249,7 +290,8 @@ def load_alternative_model():
         
         # Create a simple model architecture similar to what we expect
         model = tf.keras.Sequential([
-            tf.keras.layers.Conv2D(32, (3, 3), activation='relu', input_shape=(128, 128, 3)),
+            tf.keras.layers.InputLayer(input_shape=(128, 128, 3)),
+            tf.keras.layers.Conv2D(32, (3, 3), activation='relu'),
             tf.keras.layers.MaxPooling2D(2, 2),
             tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
             tf.keras.layers.MaxPooling2D(2, 2),
