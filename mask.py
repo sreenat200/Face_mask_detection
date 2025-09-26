@@ -11,6 +11,8 @@ import os
 import sys
 import threading
 import gc
+import requests  # Added for downloading from Hugging Face
+import urllib.request  # Alternative download method
 
 # Set page config with transparent background
 st.set_page_config(
@@ -151,6 +153,48 @@ model_loaded = False
 face_detector_loaded = False
 model_lock = threading.Lock()
 
+# Function to download model from Hugging Face
+def download_model_from_hf():
+    """Download the face mask detection model from Hugging Face repository."""
+    model_url = "https://huggingface.co/sreenathsree1578/face_mask_detection/resolve/main/mask_detection_model.h5"
+    model_path = "mask_detection_model.h5"
+    
+    try:
+        with st.spinner("Downloading model from Hugging Face..."):
+            # Show progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            
+            # Download the file with progress tracking
+            with requests.get(model_url, stream=True) as r:
+                r.raise_for_status()
+                total_size = int(r.headers.get('content-length', 0))
+                
+                with open(model_path, 'wb') as f:
+                    downloaded = 0
+                    for chunk in r.iter_content(chunk_size=8192):
+                        if chunk:  # filter out keep-alive new chunks
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total_size > 0:
+                                progress = min(downloaded / total_size, 1.0)
+                                progress_bar.progress(progress)
+                                status_text.text(f"Downloaded: {downloaded/(1024*1024):.2f} MB / {total_size/(1024*1024):.2f} MB")
+            
+            progress_bar.empty()
+            status_text.empty()
+            
+        if os.path.exists(model_path):
+            st.success(f"Model downloaded successfully to {model_path}")
+            return model_path
+        else:
+            st.error("Download completed but file not found")
+            return None
+            
+    except Exception as e:
+        st.error(f"Failed to download model: {str(e)}")
+        return None
+
 @st.cache_resource
 def load_model():
     """Load the Keras face mask detection model with enhanced error handling."""
@@ -170,6 +214,11 @@ def load_model():
                 if os.path.exists(path):
                     model_path = path
                     break
+            
+            # If model not found locally, try to download from Hugging Face
+            if model_path is None:
+                st.info("Model not found locally. Attempting to download from Hugging Face...")
+                model_path = download_model_from_hf()
             
             if model_path is None:
                 st.error("Model file not found. Please ensure 'mask_detection_model.h5' is in the app directory.")
@@ -550,7 +599,7 @@ def main():
         # Check if models loaded successfully
         if not model_loaded:
             st.error("❌ Failed to load the face mask detection model.")
-            st.info("Please ensure 'mask_detection_model.h5' is in the application directory.")
+            st.info("Please ensure 'mask_detection_model.h5' is in the application directory or check your internet connection for downloading from Hugging Face.")
             
             # Show available files
             st.write("**Available model files:**")
@@ -712,6 +761,7 @@ def main():
                 <p>Model Status: {'Loaded' if model_loaded else 'Not Loaded'} ({model_size:.2f} MB)</p>
                 <p>Face Detector: {'Loaded' if face_detector_loaded else 'Failed to load'}</p>
                 <p>Processing Mode: CPU Only (for stability)</p>
+                <p>Model Source: {'Local' if os.path.exists("mask_detection_model.h5") else 'Downloaded from Hugging Face'}</p>
             </div>
         """, unsafe_allow_html=True)
         
