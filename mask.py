@@ -29,8 +29,8 @@ except ImportError as e:
 
 try:
     import tensorflow as tf
-    # Explicitly disable GPU to avoid CUDA issues
-    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Additional safeguard
+    # Disable GPU to avoid CUDA issues
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""
     tf.config.set_visible_devices([], 'GPU')
     TENSORFLOW_AVAILABLE = True
 except ImportError as e:
@@ -325,130 +325,130 @@ class FaceMaskProcessor(VideoProcessorBase):
 
 def main():
     """Main function to run the Streamlit app."""
-    st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="description">Real-time face mask detection using deep learning. Detects faces and classifies mask usage.</p>', unsafe_allow_html=True)
-    
-    st.sidebar.markdown('<h3 class="sidebar-title">🔧 System Status</h3>', unsafe_allow_html=True)
-    status_col1, status_col2 = st.sidebar.columns(2)
-    with status_col1:
-        st.write("**Dependencies:**")
-        st.write(f"OpenCV: {'✅' if CV2_AVAILABLE else '❌'}")
-        st.write(f"TensorFlow: {'✅' if TENSORFLOW_AVAILABLE else '❌'}")
-        st.write(f"WebRTC: {'✅' if WEBRTC_AVAILABLE else '❌'}")
-    with status_col2:
-        st.write("**Components:**")
-        st.write(f"Face Detector: {'✅' if face_detector_loaded else '❌'}")
-        st.write(f"ML Model: {'✅' if model_loaded else '❌'}")
-    
-    with st.spinner("Loading models and detectors..."):
-        load_face_detector()
-        load_model()
-    
-    if not CV2_AVAILABLE or not TENSORFLOW_AVAILABLE:
-        st.error("""
-        **Critical dependencies missing!**
-        Required packages:
-        - OpenCV (for image processing)
-        - TensorFlow (for ML model)
-        Install with: `pip install opencv-python-headless tensorflow-cpu==2.10.0`
-        """)
-        return
-    
-    if not face_detector_loaded or not model_loaded:
-        st.warning("""
-        **Some components failed to load, but the app will run in demonstration mode.**
-        - You'll see sample detections
-        - Full functionality requires successful model loading
-        """)
-    
-    st.sidebar.markdown("---")
-    st.sidebar.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
-    video_size = st.sidebar.selectbox("Video Size", options=["640x480", "1280x720", "800x600"], index=0)
-    confidence_threshold = st.sidebar.slider("Confidence Threshold", min_value=0.1, max_value=0.9, value=0.5, step=0.05)
-    mirror_video = st.sidebar.checkbox("Mirror Video", value=True)
-    width, height = map(int, video_size.split('x'))
-    
-    col1, col2 = st.columns([2, 1])
-    with col1:
-        st.markdown('<div class="video-container">', unsafe_allow_html=True)
-        if WEBRTC_AVAILABLE and AV_AVAILABLE:
-            webrtc_ctx = webrtc_streamer(
-                key="face-mask-detection",
-                mode=WebRtcMode.SENDRECV,
-                video_processor_factory=lambda: FaceMaskProcessor(
-                    target_size=(width, height),
-                    confidence_threshold=confidence_threshold,
-                    mirror=mirror_video
-                ),
-                media_stream_constraints={"video": {"width": width, "height": height, "frameRate": 15}, "audio": False},
-                async_processing=True,
-            )
-        else:
-            st.warning("WebRTC not available. Camera streaming disabled.")
-            sample_img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
-            faces = detect_faces(sample_img)
-            detections = classify_faces(sample_img, faces, confidence_threshold)
-            result_img = draw_detections(sample_img, detections)
-            st.image(result_img, channels="BGR", use_column_width=True)
-        st.markdown('</div>', unsafe_allow_html=True)
-        st.info("""
-        **Instructions:**
-        1. Click **START** to begin camera streaming
-        2. Allow camera access when prompted  
-        3. System will detect faces and classify mask usage
-        4. **Green** = With mask, **Red** = Without mask
-        """)
-    
-    with col2:
-        st.markdown('<h3 class="sidebar-title">🎯 Detection Legend</h3>', unsafe_allow_html=True)
+    try:
+        st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="description">Real-time face mask detection using deep learning. Detects faces and classifies mask usage.</p>', unsafe_allow_html=True)
+        
+        st.sidebar.markdown('<h3 class="sidebar-title">🔧 System Status</h3>', unsafe_allow_html=True)
+        status_col1, status_col2 = st.sidebar.columns(2)
+        with status_col1:
+            st.write("**Dependencies:**")
+            st.write(f"OpenCV: {'✅' if CV2_AVAILABLE else '❌'}")
+            st.write(f"TensorFlow: {'✅' if TENSORFLOW_AVAILABLE else '❌'}")
+            st.write(f"WebRTC: {'✅' if WEBRTC_AVAILABLE else '❌'}")
+        with status_col2:
+            st.write("**Components:**")
+            st.write(f"Face Detector: {'✅' if face_detector_loaded else '❌'}")
+            st.write(f"ML Model: {'✅' if model_loaded else '❌'}")
+        
+        with st.spinner("Loading models and detectors..."):
+            load_face_detector()
+            load_model()
+        
+        if not CV2_AVAILABLE or not TENSORFLOW_AVAILABLE:
+            st.error("""
+            **Critical dependencies missing!**
+            Required packages:
+            - OpenCV (for image processing)
+            - TensorFlow (for ML model)
+            Install with: `pip install opencv-python-headless==4.8.1.78 tensorflow-cpu==2.10.0`
+            """)
+            return
+        
+        if not face_detector_loaded or not model_loaded:
+            st.warning("""
+            **Some components failed to load, but the app will run in demonstration mode.**
+            - You'll see sample detections
+            - Full functionality requires successful model loading
+            """)
+        
+        st.sidebar.markdown("---")
+        st.sidebar.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
+        video_size = st.sidebar.selectbox("Video Size", options=["640x480", "1280x720", "800x600"], index=0)
+        confidence_threshold = st.sidebar.slider("Confidence Threshold", min_value=0.1, max_value=0.9, value=0.5, step=0.05)
+        mirror_video = st.sidebar.checkbox("Mirror Video", value=True)
+        width, height = map(int, video_size.split('x'))
+        
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            st.markdown('<div class="video-container">', unsafe_allow_html=True)
+            if WEBRTC_AVAILABLE and AV_AVAILABLE:
+                webrtc_ctx = webrtc_streamer(
+                    key="face-mask-detection",
+                    mode=WebRtcMode.SENDRECV,
+                    video_processor_factory=lambda: FaceMaskProcessor(
+                        target_size=(width, height),
+                        confidence_threshold=confidence_threshold,
+                        mirror=mirror_video
+                    ),
+                    media_stream_constraints={"video": {"width": width, "height": height, "frameRate": 15}, "audio": False},
+                    async_processing=True,
+                )
+            else:
+                st.warning("WebRTC not available. Camera streaming disabled.")
+                sample_img = np.random.randint(0, 255, (480, 640, 3), dtype=np.uint8)
+                faces = detect_faces(sample_img)
+                detections = classify_faces(sample_img, faces, confidence_threshold)
+                result_img = draw_detections(sample_img, detections)
+                st.image(result_img, channels="BGR", use_column_width=True)
+            st.markdown('</div>', unsafe_allow_html=True)
+            st.info("""
+            **Instructions:**
+            1. Click **START** to begin camera streaming
+            2. Allow camera access when prompted  
+            3. System will detect faces and classify mask usage
+            4. **Green** = With mask, **Red** = Without mask
+            """)
+        
+        with col2:
+            st.markdown('<h3 class="sidebar-title">🎯 Detection Legend</h3>', unsafe_allow_html=True)
+            st.markdown("""
+            <div class="legend-card" style="border-color: #22c55e;">
+                <div style="display: flex; align-items: center;">
+                    <div style="width: 20px; height: 20px; background-color: #22c55e; margin-right: 10px; border-radius: 4px;"></div>
+                    <strong>Mask Detected</strong>
+                </div>
+                <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is wearing a mask properly</p>
+            </div>
+            <div class="legend-card" style="border-color: #ef4444;">
+                <div style="display: flex; align-items: center;">
+                    <div style="width: 20px; height: 20px; background-color: #ef4444; margin-right: 10px; border-radius: 4px;"></div>
+                    <strong>No Mask</strong>
+                </div>
+                <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is not wearing a mask</p>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("---")
+            st.markdown('<h3 class="sidebar-title">📊 Statistics</h3>', unsafe_allow_html=True)
+            st.write(f"**Model Input Size:** {model_input_size[0]}x{model_input_size[1]}")
+            st.write(f"**Classes:** {', '.join(class_names)}")
+            st.write(f"**Confidence Threshold:** {confidence_threshold:.0%}")
+        
+        st.markdown("---")
         st.markdown("""
-        <div class="legend-card" style="border-color: #22c55e;">
-            <div style="display: flex; align-items: center;">
-                <div style="width: 20px; height: 20px; background-color: #22c55e; margin-right: 10px; border-radius: 4px;"></div>
-                <strong>Mask Detected</strong>
-            </div>
-            <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is wearing a mask properly</p>
-        </div>
-        <div class="legend-card" style="border-color: #ef4444;">
-            <div style="display: flex; align-items: center;">
-                <div style="width: 20px; height: 20px; background-color: #ef4444; margin-right: 10px; border-radius: 4px;"></div>
-                <strong>No Mask</strong>
-            </div>
-            <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is not wearing a mask</p>
+        <div class="system-info">
+            <h3>System Information</h3>
+            <p><strong>Model:</strong> Face Mask Detection CNN</p>
+            <p><strong>Face Detection:</strong> Haar Cascade Classifier</p>
+            <p><strong>Framework:</strong> TensorFlow + OpenCV</p>
+            <p><strong>Status:</strong> {'Fully Operational' if all([CV2_AVAILABLE, TENSORFLOW_AVAILABLE, face_detector_loaded, model_loaded]) else 'Limited Functionality'}</p>
         </div>
         """, unsafe_allow_html=True)
-        st.markdown("---")
-        st.markdown('<h3 class="sidebar-title">📊 Statistics</h3>', unsafe_allow_html=True)
-        st.write(f"**Model Input Size:** {model_input_size[0]}x{model_input_size[1]}")
-        st.write(f"**Classes:** {', '.join(class_names)}")
-        st.write(f"**Confidence Threshold:** {confidence_threshold:.0%}")
-    
-    st.markdown("---")
-    st.markdown("""
-    <div class="system-info">
-        <h3>System Information</h3>
-        <p><strong>Model:</strong> Face Mask Detection CNN</p>
-        <p><strong>Face Detection:</strong> Haar Cascade Classifier</p>
-        <p><strong>Framework:</strong> TensorFlow + OpenCV</p>
-        <p><strong>Status:</strong> {'Fully Operational' if all([CV2_AVAILABLE, TENSORFLOW_AVAILABLE, face_detector_loaded, model_loaded]) else 'Limited Functionality'}</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    with st.expander("🔍 Debug Information"):
-        st.write("**Environment Info:**")
-        st.write(f"- Python: {os.sys.version.split()[0]}")
-        if TENSORFLOW_AVAILABLE:
-            st.write(f"- TensorFlow: {tf.__version__}")
-        if CV2_AVAILABLE:
-            st.write(f"- OpenCV: {cv2.__version__}")
-        st.write("**File Structure:**")
-        for file in os.listdir('.'):
-            if file.endswith(('.py', '.txt', '.h5', '.xml')):
-                st.write(f"- {file}")
-
-if __name__ == "__main__":
-    try:
-        main()
+        
+        with st.expander("🔍 Debug Information"):
+            st.write("**Environment Info:**")
+            st.write(f"- Python: {os.sys.version.split()[0]}")
+            if TENSORFLOW_AVAILABLE:
+                st.write(f"- TensorFlow: {tf.__version__}")
+            if CV2_AVAILABLE:
+                st.write(f"- OpenCV: {cv2.__version__}")
+            st.write("**File Structure:**")
+            for file in os.listdir('.'):
+                if file.endswith(('.py', '.txt', '.h5', '.xml')):
+                    st.write(f"- {file}")
     except Exception as e:
         st.error(f"Application crashed: {str(e)}")
         logger.error(f"Application crashed: {str(e)}", exc_info=True)
+
+if __name__ == "__main__":
+    main()
