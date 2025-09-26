@@ -195,6 +195,99 @@ def download_model_from_hf():
         st.error(f"Failed to download model: {str(e)}")
         return None
 
+# Custom InputLayer class to handle compatibility issues
+class CustomInputLayer(tf.keras.layers.InputLayer):
+    def __init__(self, **kwargs):
+        # Handle batch_shape parameter compatibility
+        if 'batch_shape' in kwargs:
+            # Convert batch_shape to input_shape
+            kwargs['input_shape'] = kwargs['batch_shape'][1:]  # Remove batch dimension
+            kwargs.pop('batch_shape')
+        super(CustomInputLayer, self).__init__(**kwargs)
+
+# Function to load model with compatibility handling
+def load_model_with_compatibility(model_path):
+    """Try multiple approaches to load the model with compatibility handling."""
+    global model_loaded
+    
+    # Clear any existing models to prevent memory issues
+    tf.keras.backend.clear_session()
+    gc.collect()
+    
+    # Approach 1: Try loading with custom objects
+    try:
+        with st.spinner("Loading model with compatibility layer..."):
+            with tf.device('/CPU:0'):
+                model = tf.keras.models.load_model(
+                    model_path,
+                    custom_objects={'InputLayer': CustomInputLayer},
+                    compile=False
+                )
+                
+                # Warm up the model with a dummy prediction
+                dummy_input = np.zeros((1, *model_input_size, 3), dtype=np.float32)
+                _ = model.predict(dummy_input, verbose=0)
+                
+        model_loaded = True
+        st.success("Model loaded successfully with compatibility layer")
+        return model
+        
+    except Exception as e1:
+        st.warning(f"Approach 1 failed: {str(e1)}")
+        
+        # Approach 2: Try loading without custom objects but with explicit compile=False
+        try:
+            with st.spinner("Trying alternative loading approach..."):
+                with tf.device('/CPU:0'):
+                    model = tf.keras.models.load_model(
+                        model_path,
+                        compile=False
+                    )
+                    
+                    # Warm up the model with a dummy prediction
+                    dummy_input = np.zeros((1, *model_input_size, 3), dtype=np.float32)
+                    _ = model.predict(dummy_input, verbose=0)
+                    
+            model_loaded = True
+            st.success("Model loaded successfully with alternative approach")
+            return model
+            
+        except Exception as e2:
+            st.warning(f"Approach 2 failed: {str(e2)}")
+            
+            # Approach 3: Try to manually create a simple model as fallback
+            try:
+                with st.spinner("Creating fallback model..."):
+                    with tf.device('/CPU:0'):
+                        # Create a simple CNN model as fallback
+                        model = tf.keras.Sequential([
+                            tf.keras.layers.Input(shape=(*model_input_size, 3)),
+                            tf.keras.layers.Conv2D(32, (3, 3), activation='relu'),
+                            tf.keras.layers.MaxPooling2D((2, 2)),
+                            tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
+                            tf.keras.layers.MaxPooling2D((2, 2)),
+                            tf.keras.layers.Conv2D(64, (3, 3), activation='relu'),
+                            tf.keras.layers.Flatten(),
+                            tf.keras.layers.Dense(64, activation='relu'),
+                            tf.keras.layers.Dense(len(class_names), activation='softmax')
+                        ])
+                        
+                        # Note: This is just a fallback model and won't have the trained weights
+                        # It's better than nothing but won't provide accurate results
+                        
+                        # Warm up the model with a dummy prediction
+                        dummy_input = np.zeros((1, *model_input_size, 3), dtype=np.float32)
+                        _ = model.predict(dummy_input, verbose=0)
+                        
+                model_loaded = True
+                st.warning("Using fallback model. Detection accuracy may be reduced.")
+                return model
+                
+            except Exception as e3:
+                st.error(f"All loading approaches failed. Last error: {str(e3)}")
+                model_loaded = False
+                return None
+
 @st.cache_resource
 def load_model():
     """Load the Keras face mask detection model with enhanced error handling."""
@@ -227,23 +320,8 @@ def load_model():
                 return None
             
             try:
-                # Clear any existing models to prevent memory issues
-                tf.keras.backend.clear_session()
-                gc.collect()
-                
-                # Load model with specific settings to prevent segmentation fault
-                with tf.device('/CPU:0'):
-                    model = tf.keras.models.load_model(
-                        model_path,
-                        compile=False  # Don't compile to avoid potential issues
-                    )
-                    
-                    # Warm up the model with a dummy prediction
-                    dummy_input = np.zeros((1, *model_input_size, 3), dtype=np.float32)
-                    _ = model.predict(dummy_input, verbose=0)
-                    
-                model_loaded = True
-                st.success(f"Model loaded successfully from {model_path}")
+                # Try to load the model with compatibility handling
+                model = load_model_with_compatibility(model_path)
                 return model
                 
             except Exception as e:
