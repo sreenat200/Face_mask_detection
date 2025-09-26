@@ -2,13 +2,12 @@ import streamlit as st
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-import tensorflow as tf
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
-import av
-import time
-from typing import Tuple, List, Dict, Any
 import os
 import sys
+import time
+from typing import Tuple, List, Dict, Any
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import av
 
 # Set page config with transparent background
 st.set_page_config(
@@ -131,9 +130,10 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# Force TensorFlow to use CPU only to prevent segmentation fault
+# Force TensorFlow to use CPU only and disable optimizations that cause segfaults
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "false"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"  # Suppress TensorFlow logging
 
 # Global variables for model and processor
 model = None
@@ -157,6 +157,12 @@ def load_model():
             return None
         
         try:
+            # Import TensorFlow inside the function to avoid global import issues
+            import tensorflow as tf
+            
+            # Disable all GPU related operations
+            tf.config.set_visible_devices([], 'GPU')
+            
             # Try loading with different methods
             # Method 1: Standard Keras load
             try:
@@ -424,8 +430,6 @@ def main():
             # Show system information
             st.write("**System Information:**")
             st.write(f"- Python Version: {sys.version}")
-            st.write(f"- TensorFlow Version: {tf.__version__}")
-            st.write(f"- OpenCV Version: {cv2.__version__}")
             
             # Check model file integrity
             model_path = "mask_detection_model.h5"
@@ -562,12 +566,10 @@ def main():
         st.markdown("""
             <div class="system-info">
                 <h3>System Information</h3>
-                <p>TensorFlow Version: {tf_version}</p>
                 <p>Model: {model_name} ({model_size:.2f} MB)</p>
                 <p>Face Detector: {detector_status}</p>
             </div>
         """.format(
-            tf_version=tf.__version__,
             model_name="mask_detection_model.h5",
             model_size=os.path.getsize("mask_detection_model.h5") / (1024*1024) if os.path.exists("mask_detection_model.h5") else 0,
             detector_status="Loaded" if face_detector_loaded else "Failed to load"
