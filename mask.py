@@ -10,6 +10,8 @@ from typing import Tuple, List, Dict, Any
 import os
 import h5py
 from huggingface_hub import hf_hub_download
+import requests
+import tempfile
 
 # Set page config with transparent background
 st.set_page_config(
@@ -157,6 +159,11 @@ model_input_size = (128, 128)  # From model config
 class_names = ['Mask', 'No Mask']  # From model config
 model_loaded = False
 face_detector_loaded = False
+error_details = []
+
+def add_error(message):
+    """Add error message to the error details list."""
+    error_details.append(f"[{time.strftime('%H:%M:%S')}] {message}")
 
 def inspect_model_file(model_path):
     """Inspect the model file structure to understand its format."""
@@ -178,47 +185,99 @@ def inspect_model_file(model_path):
                 
     except Exception as e:
         st.error(f"Error inspecting model file: {str(e)}")
+        add_error(f"Model inspection error: {str(e)}")
 
 def load_model() -> Any:
-    """Load the Keras face mask detection model from Hugging Face with enhanced error handling."""
+    """Load the Keras face mask detection model with enhanced error handling."""
     global model, model_loaded
     if model is None:
         model_filename = "mask_detection_model.h5"
         repo_id = "sreenathsree1578/face_mask_detection"
         
         try:
-            # Download model from Hugging Face Hub
+            # Check network connection
+            add_error("Checking network connection...")
+            try:
+                response = requests.get("https://huggingface.co", timeout=5)
+                if response.status_code != 200:
+                    add_error(f"Network error: Hugging Face returned status {response.status_code}")
+                    st.error("Cannot connect to Hugging Face Hub")
+                    return None
+            except Exception as e:
+                add_error(f"Network connection error: {str(e)}")
+                st.error(f"Network connection error: {str(e)}")
+                return None
+                
+            # Download model
+            add_error("Downloading model from Hugging Face Hub...")
             with st.spinner("Downloading model from Hugging Face Hub..."):
-                model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
+                try:
+                    model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
+                    add_error(f"Model downloaded to: {model_path}")
+                    st.write(f"Model downloaded to: {model_path}")
+                except Exception as e:
+                    add_error(f"Download failed: {str(e)}")
+                    st.error(f"Failed to download model: {str(e)}")
+                    return None
+            
+            # Check file exists
+            if not os.path.exists(model_path):
+                add_error(f"Model file not found: {model_path}")
+                st.error(f"Model file not found: {model_path}")
+                return None
+                
+            # Check file size
+            file_size = os.path.getsize(model_path)
+            add_error(f"Model file size: {file_size / (1024*1024):.2f} MB")
+            st.write(f"Model file size: {file_size / (1024*1024):.2f} MB")
             
             # Try loading with different methods
+            add_error("Attempting to load model...")
+            st.write("Attempting to load model...")
+            
             # Method 1: Standard Keras load
             try:
                 model = tf.keras.models.load_model(model_path)
                 model_loaded = True
+                add_error("Model loaded successfully with standard method")
+                st.success("Model loaded successfully!")
                 return model
             except Exception as e1:
+                add_error(f"Standard load failed: {str(e1)}")
+                st.warning(f"Standard load failed: {str(e1)}")
+                
                 # Method 2: Try with custom objects
                 try:
                     model = tf.keras.models.load_model(model_path, compile=False)
                     model_loaded = True
+                    add_error("Model loaded successfully with compile=False")
+                    st.success("Model loaded successfully (without compilation)!")
                     return model
                 except Exception as e2:
+                    add_error(f"Compile=False load failed: {str(e2)}")
+                    st.warning(f"Compile=False load failed: {str(e2)}")
+                    
                     # Method 3: Try loading as SavedModel if it's actually a directory
                     try:
                         if os.path.isdir(model_path):
                             model = tf.keras.models.load_model(model_path)
                             model_loaded = True
+                            add_error("Model loaded successfully as SavedModel")
+                            st.success("Model loaded successfully as SavedModel!")
                             return model
                     except Exception as e3:
-                        pass
+                        add_error(f"SavedModel load failed: {str(e3)}")
+                        st.warning(f"SavedModel load failed: {str(e3)}")
             
             # If all methods failed
+            add_error("All model loading methods failed")
+            st.error("All model loading methods failed")
             model_loaded = False
             return None
             
         except Exception as e:
-            st.error(f"Error loading model from Hugging Face: {str(e)}")
+            add_error(f"Unexpected error loading model: {str(e)}")
+            st.error(f"Unexpected error loading model: {str(e)}")
             model_loaded = False
             return None
     return model
@@ -228,17 +287,38 @@ def load_face_detector():
     global face_cascade, face_detector_loaded
     if face_cascade is None:
         try:
-            # Load the pre-trained Haar cascade classifier
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            add_error("Loading face detector...")
+            st.write("Loading face detector...")
             
-            # Check if the cascade was loaded successfully
+            # Check OpenCV version
+            st.write(f"OpenCV version: {cv2.__version__}")
+            
+            # Try to load Haar cascade classifier
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            add_error(f"Cascade path: {cascade_path}")
+            st.write(f"Cascade path: {cascade_path}")
+            
+            if not os.path.exists(cascade_path):
+                add_error(f"Cascade file not found: {cascade_path}")
+                st.error(f"Cascade file not found: {cascade_path}")
+                face_detector_loaded = False
+                return False
+                
+            face_cascade = cv2.CascadeClassifier(cascade_path)
+            
             if face_cascade.empty():
+                add_error("Cascade classifier is empty")
+                st.error("Cascade classifier is empty")
                 face_detector_loaded = False
                 return False
             
             face_detector_loaded = True
+            add_error("Face detector loaded successfully")
+            st.success("Face detector loaded successfully!")
             return True
         except Exception as e:
+            add_error(f"Error loading face detector: {str(e)}")
+            st.error(f"Error loading face detector: {str(e)}")
             face_detector_loaded = False
             return False
     return True
@@ -301,6 +381,7 @@ def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], co
                 })
         except Exception as e:
             st.warning(f"Error classifying face: {str(e)}")
+            add_error(f"Face classification error: {str(e)}")
     
     return detections
 
@@ -365,6 +446,7 @@ def draw_detections(image: np.ndarray, detections: List[Dict]) -> np.ndarray:
             draw.text((xmin + 5, ymin - text_height - 5), label_text, fill="white", font=font)
         except Exception as e:
             st.warning(f"Error drawing detection: {str(e)}")
+            add_error(f"Drawing detection error: {str(e)}")
     
     # Convert back to numpy array
     return np.array(pil_image)
@@ -452,6 +534,13 @@ def main():
         st.write(f"- Python Version: {os.sys.version}")
         st.write(f"- TensorFlow Version: {tf.__version__}")
         st.write(f"- OpenCV Version: {cv2.__version__}")
+        st.write(f"- Streamlit Version: {st.__version__}")
+        st.write(f"- Hugging Face Hub Version: {hf_hub_download.__module__}")
+        
+        # Show error details
+        if error_details:
+            st.markdown('<h3 class="sidebar-title">❌ Error Details</h3>', unsafe_allow_html=True)
+            st.markdown(f'<div class="error-details">{chr(10).join(error_details)}</div>', unsafe_allow_html=True)
         
         # Check model file integrity
         model_path = "mask_detection_model.h5"
@@ -467,6 +556,18 @@ def main():
                     st.write(f"- Root keys: {list(f.keys())}")
             except Exception as e:
                 st.write(f"- HDF5 file: Invalid - {str(e)}")
+        
+        # Provide alternative solutions
+        st.markdown("---")
+        st.markdown('<h3 class="sidebar-title">🛠️ Alternative Solutions</h3>', unsafe_allow_html=True)
+        
+        st.info("""
+            **If the model loading continues to fail:**
+            1. Check your internet connection
+            2. Try downloading the model manually from Hugging Face
+            3. Place the model file in the same directory as this script
+            4. Verify the model file is not corrupted
+        """)
         
         return
     
