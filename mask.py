@@ -10,6 +10,7 @@ import time
 from typing import Tuple, List, Dict, Any
 import h5py
 from huggingface_hub import hf_hub_download
+import urllib.request
 
 # Force OpenCV to use headless backend
 os.environ["OPENCV_HEADLESS"] = "1"
@@ -162,6 +163,21 @@ class_names = ['Mask', 'No Mask']  # From model config
 model_loaded = False
 face_detector_loaded = False
 
+def download_haarcascade():
+    """Download the Haar cascade file if it doesn't exist."""
+    cascade_file = "haarcascade_frontalface_default.xml"
+    cascade_url = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
+    
+    if not os.path.exists(cascade_file):
+        try:
+            with st.spinner("Downloading Haar cascade file..."):
+                urllib.request.urlretrieve(cascade_url, cascade_file)
+            st.success("Haar cascade file downloaded successfully!")
+        except Exception as e:
+            st.error(f"Failed to download Haar cascade file: {str(e)}")
+            return False
+    return True
+
 def inspect_model_file(model_path):
     """Inspect the model file structure to understand its format."""
     try:
@@ -231,9 +247,14 @@ def load_face_detector():
     """Load OpenCV's Haar cascade for face detection."""
     global face_cascade, face_detector_loaded
     if face_cascade is None:
+        # First download the Haar cascade file if needed
+        if not download_haarcascade():
+            face_detector_loaded = False
+            return False
+            
         try:
-            # Load the pre-trained Haar cascade classifier
-            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            # Load the pre-trained Haar cascade classifier from local file
+            face_cascade = cv2.CascadeClassifier("haarcascade_frontalface_default.xml")
             
             # Check if the cascade was loaded successfully
             if face_cascade.empty():
@@ -448,7 +469,7 @@ def main():
         st.write("**Current Directory:**", os.getcwd())
         st.write("**Files in Directory:**")
         for file in os.listdir():
-            if file.endswith(('.h5', '.keras')):
+            if file.endswith(('.h5', '.keras', '.xml')):
                 st.write(f"- {file}")
         
         # Show system information
@@ -471,6 +492,16 @@ def main():
                     st.write(f"- Root keys: {list(f.keys())}")
             except Exception as e:
                 st.write(f"- HDF5 file: Invalid - {str(e)}")
+        
+        # Check Haar cascade file
+        cascade_file = "haarcascade_frontalface_default.xml"
+        if os.path.exists(cascade_file):
+            st.write(f"\n**Haar Cascade File Information:**")
+            st.write(f"- File size: {os.path.getsize(cascade_file) / 1024:.2f} KB")
+            st.write(f"- File exists: Yes")
+        else:
+            st.write(f"\n**Haar Cascade File Information:**")
+            st.write(f"- File exists: No")
         
         return
     
