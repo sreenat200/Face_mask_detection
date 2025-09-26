@@ -11,16 +11,16 @@ from typing import Tuple, List, Dict, Any
 import h5py
 from huggingface_hub import hf_hub_download
 import urllib.request
-import traceback
 import logging
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Force OpenCV to use headless backend
+# Set environment variables for headless operation
+os.environ["DISPLAY"] = ":0"
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
 os.environ["OPENCV_HEADLESS"] = "1"
-cv2.ocl.setUseOpenCL(False)
 
 # Set TensorFlow to use CPU only
 try:
@@ -168,11 +168,12 @@ st.markdown("""
 # Global variables for model and processor
 model = None
 face_cascade = None
+dnn_net = None
 model_input_size = (128, 128)  # From model config
 class_names = ['Mask', 'No Mask']  # From model config
 model_loaded = False
 face_detector_loaded = False
-use_fallback_detector = False
+use_dnn_detector = False
 
 def download_haarcascade():
     """Download the Haar cascade file if it doesn't exist."""
@@ -189,6 +190,25 @@ def download_haarcascade():
             st.error(f"Failed to download Haar cascade file: {str(e)}")
             return False
     return True
+
+def download_dnn_model():
+    """Download the DNN face detection model files."""
+    model_files = {
+        "deploy.prototxt": "https://raw.githubusercontent.com/opencv/opencv/master/samples/dnn/face_detector/deploy.prototxt",
+        "res10_300x300_ssd_iter_140000.caffemodel": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/dnn_samples_face_detector_20170830/res10_300x300_ssd_iter_140000.caffemodel"
+    }
+    
+    all_downloaded = True
+    for filename, url in model_files.items():
+        if not os.path.exists(filename):
+            try:
+                with st.spinner(f"Downloading {filename}..."):
+                    urllib.request.urlretrieve(url, filename)
+                st.success(f"{filename} downloaded successfully!")
+            except Exception as e:
+                st.error(f"Failed to download {filename}: {str(e)}")
+                all_downloaded = False
+    return all_downloaded
 
 def load_model() -> Any:
     """Load the Keras face mask detection model from Hugging Face with enhanced error handling."""
@@ -244,14 +264,16 @@ def load_model() -> Any:
     return model
 
 def load_face_detector():
-    """Load OpenCV's Haar cascade for face detection."""
-    global face_cascade, face_detector_loaded, use_fallback_detector
-    if face_cascade is None:
-        # First download the Haar cascade file if needed
+    """Load OpenCV's Haar cascade or DNN face detector."""
+    global face_cascade, dnn_net, face_detector_loaded, use_dnn_detector
+    
+    # First try to load Haar cascade
+    if not use_dnn_detector:
+        # Download the Haar cascade file if needed
         if not download_haarcascade():
-            face_detector_loaded = False
-            use_fallback_detector = True
-            return False
+            logger.info("Haar cascade download failed, trying DNN detector")
+            use_dnn_detector = True
+            return load_face_detector()
             
         try:
             # Load the pre-trained Haar cascade classifier from local file
@@ -259,51 +281,36 @@ def load_face_detector():
             
             # Check if the cascade was loaded successfully
             if face_cascade.empty():
-                face_detector_loaded = False
-                use_fallback_detector = True
-                return False
+                logger.info("Haar cascade is empty, trying DNN detector")
+                use_dnn_detector = True
+                return load_face_detector()
             
             face_detector_loaded = True
-            use_fallback_detector = False
+            use_dnn_detector = False
             return True
         except Exception as e:
-            logger.error(f"Error loading face detector: {e}")
-            face_detector_loaded = False
-            use_fallback_detector = True
-            return False
-    return True
+            logger.error(f"Error loading Haar cascade: {e}")
+            use_dnn_detector = True
+            return load_face_detector()
+    
+    # If we're here, we need to use the DNN detector
+    if not download_dnn_model():
+        face_detector_loaded = False
+        return False
+    
+    try:
+        # Load the DNN model
+        dnn_net = cv2.dnn.readNetFromCaffe("deploy.prototxt", "res10_300x300_ssd_iter_140000.caffemodel")
+        face_detector_loaded = True
+        use_dnn_detector = True
+        return True
+    except Exception as e:
+        logger.error(f"Error loading DNN model: {e}")
+        face_detector_loaded = False
+        return False
 
-def detect_faces_fallback(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    """Fallback face detection using simple image processing."""
-    # Convert to grayscale
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    
-    # Apply Gaussian blur to reduce noise
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # Apply thresholding to get a binary image
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # Find contours in the binary image
-    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
-    
-    # Filter contours based on size and aspect ratio to find potential faces
-    faces = []
-    for contour in contours:
-        # Get bounding rectangle
-        x, y, w, h = cv2.boundingRect(contour)
-        
-        # Filter based on size and aspect ratio
-        if w > 30 and h > 30 and 0.7 < w/h < 1.3:
-            faces.append((x, y, w, h))
-    
-    return faces
-
-def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    """Detect faces in the image using Haar cascade or fallback method."""
-    if use_fallback_detector or not face_detector_loaded:
-        return detect_faces_fallback(image)
-    
+def detect_faces_haar(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Detect faces using Haar cascade."""
     # Convert to grayscale for face detection
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
@@ -318,6 +325,42 @@ def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
     
     # Convert to list of tuples (x, y, w, h)
     return [(x, y, w, h) for (x, y, w, h) in faces]
+
+def detect_faces_dnn(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Detect faces using DNN model."""
+    # Get image dimensions
+    (h, w) = image.shape[:2]
+    
+    # Create a blob from the image
+    blob = cv2.dnn.blobFromImage(cv2.resize(image, (300, 300)), 1.0, (300, 300), (104.0, 177.0, 123.0))
+    
+    # Pass the blob through the network and get the detections
+    dnn_net.setInput(blob)
+    detections = dnn_net.forward()
+    
+    faces = []
+    # Loop over the detections
+    for i in range(0, detections.shape[2]):
+        # Extract the confidence (i.e., probability) associated with the prediction
+        confidence = detections[0, 0, i, 2]
+        
+        # Filter out weak detections by ensuring the confidence is greater than a minimum threshold
+        if confidence > 0.5:
+            # Compute the (x, y)-coordinates of the bounding box for the object
+            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
+            (startX, startY, endX, endY) = box.astype("int")
+            
+            # Add to faces list
+            faces.append((startX, startY, endX - startX, endY - startY))
+    
+    return faces
+
+def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Detect faces in the image using Haar cascade or DNN method."""
+    if use_dnn_detector:
+        return detect_faces_dnn(image)
+    else:
+        return detect_faces_haar(image)
 
 def preprocess_image(image: np.ndarray) -> np.ndarray:
     """Preprocess image for model inference."""
@@ -500,8 +543,8 @@ def main():
         load_face_detector()
         
         # Check if models loaded successfully
-        if not model_loaded:
-            st.error("Failed to load the model. Please check the files and try again.")
+        if not model_loaded or not face_detector_loaded:
+            st.error("Failed to load the model or face detector. Please check the files and try again.")
             
             # Additional debugging information
             st.markdown("---")
@@ -510,7 +553,7 @@ def main():
             st.write("**Current Directory:**", os.getcwd())
             st.write("**Files in Directory:**")
             for file in os.listdir():
-                if file.endswith(('.h5', '.keras', '.xml')):
+                if file.endswith(('.h5', '.keras', '.xml', '.prototxt', '.caffemodel')):
                     st.write(f"- {file}")
             
             # Show system information
@@ -543,6 +586,15 @@ def main():
             else:
                 st.write(f"\n**Haar Cascade File Information:**")
                 st.write(f"- File exists: No")
+            
+            # Check DNN model files
+            dnn_files = ["deploy.prototxt", "res10_300x300_ssd_iter_140000.caffemodel"]
+            st.write(f"\n**DNN Model Files Information:**")
+            for file in dnn_files:
+                if os.path.exists(file):
+                    st.write(f"- {file}: Exists ({os.path.getsize(file) / (1024*1024):.2f} MB)")
+                else:
+                    st.write(f"- {file}: Not found")
             
             return
         
@@ -670,10 +722,10 @@ def main():
             # Show face detector status
             st.markdown("---")
             st.markdown('<h3 class="sidebar-title">🔍 Face Detector Status</h3>', unsafe_allow_html=True)
-            if use_fallback_detector:
-                st.warning("Using fallback face detection method. Accuracy may be reduced.")
+            if use_dnn_detector:
+                st.success("Using DNN face detection (more accurate)")
             else:
-                st.success("Using Haar cascade face detection.")
+                st.success("Using Haar cascade face detection (faster)")
         
         # System information at the bottom
         st.markdown("---")
@@ -688,7 +740,7 @@ def main():
         """.format(
             tf_version=tf.__version__,
             model_name="mask_detection_model.h5",
-            detector_status="Fallback" if use_fallback_detector else ("Loaded" if face_detector_loaded else "Failed to load")
+            detector_status="DNN" if use_dnn_detector else ("Haar Cascade" if face_detector_loaded else "Failed to load")
         ), unsafe_allow_html=True)
         
         # Footer
