@@ -11,13 +11,23 @@ from typing import Tuple, List, Dict, Any
 import h5py
 from huggingface_hub import hf_hub_download
 import urllib.request
+import traceback
+import logging
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Force OpenCV to use headless backend
 os.environ["OPENCV_HEADLESS"] = "1"
 cv2.ocl.setUseOpenCL(False)
 
 # Set TensorFlow to use CPU only
-tf.config.set_visible_devices([], 'GPU')
+try:
+    tf.config.set_visible_devices([], 'GPU')
+    logger.info("TensorFlow configured to use CPU only")
+except Exception as e:
+    logger.error(f"Error configuring TensorFlow for CPU: {e}")
 
 # Set page config with transparent background
 st.set_page_config(
@@ -162,6 +172,7 @@ model_input_size = (128, 128)  # From model config
 class_names = ['Mask', 'No Mask']  # From model config
 model_loaded = False
 face_detector_loaded = False
+use_fallback_detector = False
 
 def download_haarcascade():
     """Download the Haar cascade file if it doesn't exist."""
@@ -173,31 +184,11 @@ def download_haarcascade():
             with st.spinner("Downloading Haar cascade file..."):
                 urllib.request.urlretrieve(cascade_url, cascade_file)
             st.success("Haar cascade file downloaded successfully!")
+            return True
         except Exception as e:
             st.error(f"Failed to download Haar cascade file: {str(e)}")
             return False
     return True
-
-def inspect_model_file(model_path):
-    """Inspect the model file structure to understand its format."""
-    try:
-        with h5py.File(model_path, 'r') as f:
-            # Check if it's a valid HDF5 file
-            st.write("Model file structure:")
-            def print_attrs(name, obj):
-                st.write(f"{name}: {list(obj.attrs.keys())}")
-            f.visititems(print_attrs)
-            
-            # Check for model weights
-            if 'model_weights' in f:
-                st.write("Found model_weights group")
-            if 'model_config' in f:
-                st.write("Found model_config")
-            if 'training_config' in f:
-                st.write("Found training_config")
-                
-    except Exception as e:
-        st.error(f"Error inspecting model file: {str(e)}")
 
 def load_model() -> Any:
     """Load the Keras face mask detection model from Hugging Face with enhanced error handling."""
@@ -214,30 +205,39 @@ def load_model() -> Any:
             # Try loading with different methods
             # Method 1: Standard Keras load
             try:
+                logger.info("Attempting to load model with standard method")
                 model = tf.keras.models.load_model(model_path)
                 model_loaded = True
+                logger.info("Model loaded successfully with standard method")
                 return model
             except Exception as e1:
+                logger.error(f"Standard model loading failed: {e1}")
                 # Method 2: Try with custom objects
                 try:
+                    logger.info("Attempting to load model with compile=False")
                     model = tf.keras.models.load_model(model_path, compile=False)
                     model_loaded = True
+                    logger.info("Model loaded successfully with compile=False")
                     return model
                 except Exception as e2:
+                    logger.error(f"Model loading with compile=False failed: {e2}")
                     # Method 3: Try loading as SavedModel if it's actually a directory
                     try:
+                        logger.info("Attempting to load model as SavedModel")
                         if os.path.isdir(model_path):
                             model = tf.keras.models.load_model(model_path)
                             model_loaded = True
+                            logger.info("Model loaded successfully as SavedModel")
                             return model
                     except Exception as e3:
-                        pass
+                        logger.error(f"SavedModel loading failed: {e3}")
             
             # If all methods failed
             model_loaded = False
             return None
             
         except Exception as e:
+            logger.error(f"Error loading model from Hugging Face: {e}")
             st.error(f"Error loading model from Hugging Face: {str(e)}")
             model_loaded = False
             return None
@@ -245,11 +245,12 @@ def load_model() -> Any:
 
 def load_face_detector():
     """Load OpenCV's Haar cascade for face detection."""
-    global face_cascade, face_detector_loaded
+    global face_cascade, face_detector_loaded, use_fallback_detector
     if face_cascade is None:
         # First download the Haar cascade file if needed
         if not download_haarcascade():
             face_detector_loaded = False
+            use_fallback_detector = True
             return False
             
         try:
@@ -259,26 +260,50 @@ def load_face_detector():
             # Check if the cascade was loaded successfully
             if face_cascade.empty():
                 face_detector_loaded = False
+                use_fallback_detector = True
                 return False
             
             face_detector_loaded = True
+            use_fallback_detector = False
             return True
         except Exception as e:
+            logger.error(f"Error loading face detector: {e}")
             face_detector_loaded = False
+            use_fallback_detector = True
             return False
     return True
 
-def preprocess_image(image: np.ndarray) -> np.ndarray:
-    """Preprocess image for model inference."""
-    # Resize to model input size
-    resized = cv2.resize(image, model_input_size)
-    # Normalize to [0,1]
-    normalized = resized.astype(np.float32) / 255.0
-    # Add batch dimension
-    return np.expand_dims(normalized, axis=0)
+def detect_faces_fallback(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Fallback face detection using simple image processing."""
+    # Convert to grayscale
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Apply Gaussian blur to reduce noise
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # Apply thresholding to get a binary image
+    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # Find contours in the binary image
+    contours, _ = cv2.findContours(thresh, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # Filter contours based on size and aspect ratio to find potential faces
+    faces = []
+    for contour in contours:
+        # Get bounding rectangle
+        x, y, w, h = cv2.boundingRect(contour)
+        
+        # Filter based on size and aspect ratio
+        if w > 30 and h > 30 and 0.7 < w/h < 1.3:
+            faces.append((x, y, w, h))
+    
+    return faces
 
 def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
-    """Detect faces in the image using Haar cascade."""
+    """Detect faces in the image using Haar cascade or fallback method."""
+    if use_fallback_detector or not face_detector_loaded:
+        return detect_faces_fallback(image)
+    
     # Convert to grayscale for face detection
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     
@@ -294,9 +319,22 @@ def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
     # Convert to list of tuples (x, y, w, h)
     return [(x, y, w, h) for (x, y, w, h) in faces]
 
+def preprocess_image(image: np.ndarray) -> np.ndarray:
+    """Preprocess image for model inference."""
+    # Resize to model input size
+    resized = cv2.resize(image, model_input_size)
+    # Normalize to [0,1]
+    normalized = resized.astype(np.float32) / 255.0
+    # Add batch dimension
+    return np.expand_dims(normalized, axis=0)
+
 def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], confidence_threshold: float = 0.5) -> List[Dict]:
     """Classify each detected face as mask or no mask."""
     detections = []
+    
+    if not model_loaded:
+        # If model is not loaded, return empty detections
+        return detections
     
     for (x, y, w, h) in faces:
         # Extract face ROI
@@ -325,6 +363,7 @@ def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], co
                     "box": {"xmin": x, "ymin": y, "xmax": x + w, "ymax": y + h}
                 })
         except Exception as e:
+            logger.warning(f"Error classifying face: {e}")
             st.warning(f"Error classifying face: {str(e)}")
     
     return detections
@@ -389,6 +428,7 @@ def draw_detections(image: np.ndarray, detections: List[Dict]) -> np.ndarray:
             # Draw text
             draw.text((xmin + 5, ymin - text_height - 5), label_text, fill="white", font=font)
         except Exception as e:
+            logger.warning(f"Error drawing detection: {e}")
             st.warning(f"Error drawing detection: {str(e)}")
     
     # Convert back to numpy array
@@ -450,205 +490,217 @@ class FaceMaskProcessor(VideoProcessorBase):
 
 def main():
     """Main function to run the Streamlit app."""
-    # Header
-    st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="description">Real-time face mask detection using a Keras model. The system detects faces and classifies whether they are wearing a mask or not.</p>', unsafe_allow_html=True)
-    
-    # Load model and face detector
-    model = load_model()
-    load_face_detector()
-    
-    # Check if models loaded successfully
-    if not model_loaded or not face_detector_loaded:
-        st.error("Failed to load the model or face detector. Please check the files and try again.")
+    try:
+        # Header
+        st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
+        st.markdown('<p class="description">Real-time face mask detection using a Keras model. The system detects faces and classifies whether they are wearing a mask or not.</p>', unsafe_allow_html=True)
         
-        # Additional debugging information
-        st.markdown("---")
-        st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
+        # Load model and face detector
+        model = load_model()
+        load_face_detector()
         
-        st.write("**Current Directory:**", os.getcwd())
-        st.write("**Files in Directory:**")
-        for file in os.listdir():
-            if file.endswith(('.h5', '.keras', '.xml')):
-                st.write(f"- {file}")
-        
-        # Show system information
-        st.write("**System Information:**")
-        st.write(f"- Python Version: {os.sys.version}")
-        st.write(f"- TensorFlow Version: {tf.__version__}")
-        st.write(f"- OpenCV Version: {cv2.__version__}")
-        
-        # Check model file integrity
-        model_path = "mask_detection_model.h5"
-        if os.path.exists(model_path):
-            st.write(f"\n**Model File Information:**")
-            st.write(f"- File size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
-            st.write(f"- File exists: Yes")
+        # Check if models loaded successfully
+        if not model_loaded:
+            st.error("Failed to load the model. Please check the files and try again.")
             
-            # Try to read the file as HDF5
-            try:
-                with h5py.File(model_path, 'r') as f:
-                    st.write(f"- HDF5 file: Valid")
-                    st.write(f"- Root keys: {list(f.keys())}")
-            except Exception as e:
-                st.write(f"- HDF5 file: Invalid - {str(e)}")
+            # Additional debugging information
+            st.markdown("---")
+            st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
+            
+            st.write("**Current Directory:**", os.getcwd())
+            st.write("**Files in Directory:**")
+            for file in os.listdir():
+                if file.endswith(('.h5', '.keras', '.xml')):
+                    st.write(f"- {file}")
+            
+            # Show system information
+            st.write("**System Information:**")
+            st.write(f"- Python Version: {os.sys.version}")
+            st.write(f"- TensorFlow Version: {tf.__version__}")
+            st.write(f"- OpenCV Version: {cv2.__version__}")
+            
+            # Check model file integrity
+            model_path = "mask_detection_model.h5"
+            if os.path.exists(model_path):
+                st.write(f"\n**Model File Information:**")
+                st.write(f"- File size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
+                st.write(f"- File exists: Yes")
+                
+                # Try to read the file as HDF5
+                try:
+                    with h5py.File(model_path, 'r') as f:
+                        st.write(f"- HDF5 file: Valid")
+                        st.write(f"- Root keys: {list(f.keys())}")
+                except Exception as e:
+                    st.write(f"- HDF5 file: Invalid - {str(e)}")
+            
+            # Check Haar cascade file
+            cascade_file = "haarcascade_frontalface_default.xml"
+            if os.path.exists(cascade_file):
+                st.write(f"\n**Haar Cascade File Information:**")
+                st.write(f"- File size: {os.path.getsize(cascade_file) / 1024:.2f} KB")
+                st.write(f"- File exists: Yes")
+            else:
+                st.write(f"\n**Haar Cascade File Information:**")
+                st.write(f"- File exists: No")
+            
+            return
         
-        # Check Haar cascade file
-        cascade_file = "haarcascade_frontalface_default.xml"
-        if os.path.exists(cascade_file):
-            st.write(f"\n**Haar Cascade File Information:**")
-            st.write(f"- File size: {os.path.getsize(cascade_file) / 1024:.2f} KB")
-            st.write(f"- File exists: Yes")
-        else:
-            st.write(f"\n**Haar Cascade File Information:**")
-            st.write(f"- File exists: No")
+        # Sidebar
+        with st.sidebar:
+            st.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
+            
+            # Video size selection
+            video_size = st.selectbox(
+                "Video Size",
+                options=["640x480", "1280x720", "1920x1080"],
+                index=0,
+                help="Select the resolution for the video stream"
+            )
+            
+            # FPS selection
+            fps = st.slider(
+                "Frames Per Second (FPS)",
+                min_value=5,
+                max_value=30,
+                value=15,
+                step=1,
+                help="Adjust the frame rate for video processing"
+            )
+            
+            # Mirror video option
+            mirror_video = st.checkbox(
+                "Mirror Video",
+                value=False,
+                help="Flip the video horizontally"
+            )
+            
+            # Confidence threshold
+            confidence_threshold = st.slider(
+                "Confidence Threshold",
+                min_value=0.1,
+                max_value=0.9,
+                value=0.5,
+                step=0.05,
+                help="Minimum confidence score for detections"
+            )
+            
+            # Face detection parameters
+            st.markdown("---")
+            st.markdown('<h3 class="sidebar-title">🔍 Face Detection</h3>', unsafe_allow_html=True)
+            
+            scale_factor = st.slider(
+                "Scale Factor",
+                min_value=1.01,
+                max_value=1.5,
+                value=1.1,
+                step=0.01,
+                help="Parameter specifying how much the image size is reduced at each image scale"
+            )
+            
+            min_neighbors = st.slider(
+                "Min Neighbors",
+                min_value=1,
+                max_value=10,
+                value=5,
+                step=1,
+                help="Parameter specifying how many neighbors each candidate rectangle should have to retain it"
+            )
         
-        return
-    
-    # Sidebar
-    with st.sidebar:
-        st.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
+        # Parse video size
+        width, height = map(int, video_size.split('x'))
         
-        # Video size selection
-        video_size = st.selectbox(
-            "Video Size",
-            options=["640x480", "1280x720", "1920x1080"],
-            index=0,
-            help="Select the resolution for the video stream"
-        )
+        # Main content area
+        col1, col2 = st.columns([2, 1])
         
-        # FPS selection
-        fps = st.slider(
-            "Frames Per Second (FPS)",
-            min_value=5,
-            max_value=30,
-            value=15,
-            step=1,
-            help="Adjust the frame rate for video processing"
-        )
-        
-        # Mirror video option
-        mirror_video = st.checkbox(
-            "Mirror Video",
-            value=False,
-            help="Flip the video horizontally"
-        )
-        
-        # Confidence threshold
-        confidence_threshold = st.slider(
-            "Confidence Threshold",
-            min_value=0.1,
-            max_value=0.9,
-            value=0.5,
-            step=0.05,
-            help="Minimum confidence score for detections"
-        )
-        
-        # Face detection parameters
-        st.markdown("---")
-        st.markdown('<h3 class="sidebar-title">🔍 Face Detection</h3>', unsafe_allow_html=True)
-        
-        scale_factor = st.slider(
-            "Scale Factor",
-            min_value=1.01,
-            max_value=1.5,
-            value=1.1,
-            step=0.01,
-            help="Parameter specifying how much the image size is reduced at each image scale"
-        )
-        
-        min_neighbors = st.slider(
-            "Min Neighbors",
-            min_value=1,
-            max_value=10,
-            value=5,
-            step=1,
-            help="Parameter specifying how many neighbors each candidate rectangle should have to retain it"
-        )
-    
-    # Parse video size
-    width, height = map(int, video_size.split('x'))
-    
-    # Main content area
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.markdown('<div class="video-container">', unsafe_allow_html=True)
-        
-        # WebRTC streamer
-        webrtc_ctx = webrtc_streamer(
-            key="face-mask-detection",
-            mode=WebRtcMode.SENDRECV,
-            video_processor_factory=lambda: FaceMaskProcessor(
-                model, (width, height), confidence_threshold, mirror_video
-            ),
-            media_stream_constraints={
-                "video": {
-                    "width": {"ideal": width},
-                    "height": {"ideal": height},
-                    "frameRate": {"ideal": fps}
+        with col1:
+            st.markdown('<div class="video-container">', unsafe_allow_html=True)
+            
+            # WebRTC streamer
+            webrtc_ctx = webrtc_streamer(
+                key="face-mask-detection",
+                mode=WebRtcMode.SENDRECV,
+                video_processor_factory=lambda: FaceMaskProcessor(
+                    model, (width, height), confidence_threshold, mirror_video
+                ),
+                media_stream_constraints={
+                    "video": {
+                        "width": {"ideal": width},
+                        "height": {"ideal": height},
+                        "frameRate": {"ideal": fps}
+                    },
+                    "audio": False
                 },
-                "audio": False
-            },
-            async_processing=True,
-        )
-        
-        st.markdown('</div>', unsafe_allow_html=True)
-        
-        # Instructions
-        st.info("""
-            **Instructions:**
-            1. Click "START" to begin video streaming
-            2. Allow camera access when prompted
-            3. The system will detect faces and classify mask usage in real-time
-            4. Green boxes = With mask, Red boxes = Without mask
-        """)
-    
-    with col2:
-        st.markdown('<h3 class="sidebar-title">🎯 Detection Legend</h3>', unsafe_allow_html=True)
-        
-        # Create legend cards
-        st.markdown("""
-            <div class="legend-card" style="border-color: #22c55e;">
-                <div style="display: flex; align-items: center;">
-                    <div style="width: 20px; height: 20px; background-color: #22c55e; margin-right: 10px; border-radius: 4px;"></div>
-                    <strong>Mask</strong>
-                </div>
-                <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is wearing a mask</p>
-            </div>
+                async_processing=True,
+            )
             
-            <div class="legend-card" style="border-color: #ef4444;">
-                <div style="display: flex; align-items: center;">
-                    <div style="width: 20px; height: 20px; background-color: #ef4444; margin-right: 10px; border-radius: 4px;"></div>
-                    <strong>No Mask</strong>
+            st.markdown('</div>', unsafe_allow_html=True)
+            
+            # Instructions
+            st.info("""
+                **Instructions:**
+                1. Click "START" to begin video streaming
+                2. Allow camera access when prompted
+                3. The system will detect faces and classify mask usage in real-time
+                4. Green boxes = With mask, Red boxes = Without mask
+            """)
+        
+        with col2:
+            st.markdown('<h3 class="sidebar-title">🎯 Detection Legend</h3>', unsafe_allow_html=True)
+            
+            # Create legend cards
+            st.markdown("""
+                <div class="legend-card" style="border-color: #22c55e;">
+                    <div style="display: flex; align-items: center;">
+                        <div style="width: 20px; height: 20px; background-color: #22c55e; margin-right: 10px; border-radius: 4px;"></div>
+                        <strong>Mask</strong>
+                    </div>
+                    <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is wearing a mask</p>
                 </div>
-                <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is not wearing a mask</p>
+                
+                <div class="legend-card" style="border-color: #ef4444;">
+                    <div style="display: flex; align-items: center;">
+                        <div style="width: 20px; height: 20px; background-color: #ef4444; margin-right: 10px; border-radius: 4px;"></div>
+                        <strong>No Mask</strong>
+                    </div>
+                    <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is not wearing a mask</p>
+                </div>
+            """, unsafe_allow_html=True)
+            
+            # Show face detector status
+            st.markdown("---")
+            st.markdown('<h3 class="sidebar-title">🔍 Face Detector Status</h3>', unsafe_allow_html=True)
+            if use_fallback_detector:
+                st.warning("Using fallback face detection method. Accuracy may be reduced.")
+            else:
+                st.success("Using Haar cascade face detection.")
+        
+        # System information at the bottom
+        st.markdown("---")
+        st.markdown("""
+            <div class="system-info">
+                <h3>System Information</h3>
+                <p>TensorFlow Version: {tf_version}</p>
+                <p>Model: {model_name} (Loaded from Hugging Face)</p>
+                <p>Face Detector: {detector_status}</p>
+                <p>Device: CPU</p>
             </div>
-        """, unsafe_allow_html=True)
-    
-    # System information at the bottom
-    st.markdown("---")
-    st.markdown("""
-        <div class="system-info">
-            <h3>System Information</h3>
-            <p>TensorFlow Version: {tf_version}</p>
-            <p>Model: {model_name} (Loaded from Hugging Face)</p>
-            <p>Face Detector: {detector_status}</p>
-            <p>Device: CPU</p>
-        </div>
-    """.format(
-        tf_version=tf.__version__,
-        model_name="mask_detection_model.h5",
-        detector_status="Loaded" if face_detector_loaded else "Failed to load"
-    ), unsafe_allow_html=True)
-    
-    # Footer
-    st.markdown(
-        '<footer style="text-align: center; color: #b0b0b0; font-size: 0.9rem;">'
-        'Built with ❤️ using Streamlit, TensorFlow, and OpenCV'
-        '</footer>', 
-        unsafe_allow_html=True
-    )
+        """.format(
+            tf_version=tf.__version__,
+            model_name="mask_detection_model.h5",
+            detector_status="Fallback" if use_fallback_detector else ("Loaded" if face_detector_loaded else "Failed to load")
+        ), unsafe_allow_html=True)
+        
+        # Footer
+        st.markdown(
+            '<footer style="text-align: center; color: #b0b0b0; font-size: 0.9rem;">'
+            'Built with ❤️ using Streamlit, TensorFlow, and OpenCV'
+            '</footer>', 
+            unsafe_allow_html=True
+        )
+    except Exception as e:
+        st.error(f"An error occurred: {str(e)}")
+        st.error(f"Error details: {traceback.format_exc()}")
 
 if __name__ == "__main__":
     main()
