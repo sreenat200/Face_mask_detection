@@ -11,8 +11,8 @@ import os
 import sys
 import threading
 import gc
-import requests  # Added for downloading from Hugging Face
-import urllib.request  # Alternative download method
+import requests
+import h5py  # Added for manual model loading
 
 # Set page config with transparent background
 st.set_page_config(
@@ -195,8 +195,14 @@ def download_model_from_hf():
         st.error(f"Failed to download model: {str(e)}")
         return None
 
-# Custom InputLayer class to handle compatibility issues
+# Custom classes to handle compatibility issues
+class CustomDTypePolicy:
+    """Custom DTypePolicy class to handle compatibility with newer Keras versions."""
+    def __init__(self, name='float32'):
+        self.name = name
+
 class CustomInputLayer(tf.keras.layers.InputLayer):
+    """Custom InputLayer class to handle batch_shape parameter compatibility."""
     def __init__(self, **kwargs):
         # Handle batch_shape parameter compatibility
         if 'batch_shape' in kwargs:
@@ -204,6 +210,56 @@ class CustomInputLayer(tf.keras.layers.InputLayer):
             kwargs['input_shape'] = kwargs['batch_shape'][1:]  # Remove batch dimension
             kwargs.pop('batch_shape')
         super(CustomInputLayer, self).__init__(**kwargs)
+
+# Function to manually load and fix model configuration
+def load_model_with_manual_fix(model_path):
+    """Manually load the model and fix compatibility issues."""
+    try:
+        with st.spinner("Manually loading and fixing model..."):
+            # Read the model file
+            with h5py.File(model_path, 'r') as f:
+                # Get model config
+                model_config = f['model_config'][()]
+                if isinstance(model_config, bytes):
+                    model_config = model_config.decode('utf-8')
+                
+                import json
+                config_dict = json.loads(model_config)
+                
+                # Fix InputLayer config
+                if 'config' in config_dict and 'layers' in config_dict['config']:
+                    for layer_config in config_dict['config']['layers']:
+                        if layer_config['class_name'] == 'InputLayer':
+                            if 'batch_shape' in layer_config['config']:
+                                # Convert batch_shape to input_shape
+                                layer_config['config']['input_shape'] = layer_config['config']['batch_shape'][1:]
+                                del layer_config['config']['batch_shape']
+                        
+                        # Fix Conv2D dtype configuration
+                        if layer_config['class_name'] == 'Conv2D':
+                            if 'dtype' in layer_config['config'] and isinstance(layer_config['config']['dtype'], dict):
+                                if layer_config['config']['dtype']['class_name'] == 'DTypePolicy':
+                                    # Replace DTypePolicy with simple dtype string
+                                    layer_config['config']['dtype'] = layer_config['config']['dtype']['config']['name']
+                
+                # Create model from fixed config
+                with tf.device('/CPU:0'):
+                    model = tf.keras.models.model_from_json(json.dumps(config_dict))
+                    
+                    # Load weights
+                    model.load_weights(model_path)
+                    
+                    # Warm up the model with a dummy prediction
+                    dummy_input = np.zeros((1, *model_input_size, 3), dtype=np.float32)
+                    _ = model.predict(dummy_input, verbose=0)
+                    
+        model_loaded = True
+        st.success("Model loaded successfully with manual configuration fix")
+        return model
+        
+    except Exception as e:
+        st.warning(f"Manual loading failed: {str(e)}")
+        return None
 
 # Function to load model with compatibility handling
 def load_model_with_compatibility(model_path):
@@ -220,7 +276,10 @@ def load_model_with_compatibility(model_path):
             with tf.device('/CPU:0'):
                 model = tf.keras.models.load_model(
                     model_path,
-                    custom_objects={'InputLayer': CustomInputLayer},
+                    custom_objects={
+                        'InputLayer': CustomInputLayer,
+                        'DTypePolicy': CustomDTypePolicy
+                    },
                     compile=False
                 )
                 
@@ -235,23 +294,11 @@ def load_model_with_compatibility(model_path):
     except Exception as e1:
         st.warning(f"Approach 1 failed: {str(e1)}")
         
-        # Approach 2: Try loading without custom objects but with explicit compile=False
+        # Approach 2: Try manual loading with configuration fix
         try:
-            with st.spinner("Trying alternative loading approach..."):
-                with tf.device('/CPU:0'):
-                    model = tf.keras.models.load_model(
-                        model_path,
-                        compile=False
-                    )
-                    
-                    # Warm up the model with a dummy prediction
-                    dummy_input = np.zeros((1, *model_input_size, 3), dtype=np.float32)
-                    _ = model.predict(dummy_input, verbose=0)
-                    
-            model_loaded = True
-            st.success("Model loaded successfully with alternative approach")
-            return model
-            
+            model = load_model_with_manual_fix(model_path)
+            if model is not None:
+                return model
         except Exception as e2:
             st.warning(f"Approach 2 failed: {str(e2)}")
             
