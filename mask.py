@@ -565,3 +565,7 @@ def main():
         st.write(f"**TensorFlow:** {'Available' if TENSORFLOW_AVAILABLE else 'Not available'}")
         st.write(f"**Face Detector:** {'OpenCV' if face_detector_loaded else 'Fallback'}")
         st.write(f"**Model:** {'Loaded' if model_loaded else 'Fallback'}")
+        
+if __name__ == "__main__":
+    main()
+
