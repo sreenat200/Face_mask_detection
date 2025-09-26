@@ -1,9 +1,10 @@
 streamlit>=1.39.0
 streamlit-webrtc>=0.63.4
-opencv-python
+opencv-python-headless
 tensorflow
 numpy
 pillow
 huggingface-hub
+
 
 
