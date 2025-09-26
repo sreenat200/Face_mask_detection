@@ -127,6 +127,15 @@ st.markdown("""
         .system-info p {
             margin: 0.2rem 0;
         }
+        
+        /* File uploader styling */
+        .uploadedFile {
+            background-color: #2a2a2a;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin: 1rem 0;
+            border: 1px solid #444;
+        }
     </style>
 """, unsafe_allow_html=True)
 
@@ -143,16 +152,13 @@ class_names = ['Mask', 'No Mask']  # From model config
 model_loaded = False
 face_detector_loaded = False
 
-def load_model():
+def load_model(model_path="mask_detection_model.h5"):
     """Load the Keras face mask detection model with enhanced error handling."""
     global model, model_loaded
     if model is None:
-        model_path = "mask_detection_model.h5"
-        
         # Check if model file exists
         if not os.path.exists(model_path):
             st.error(f"Model file not found: {model_path}")
-            st.info("Please make sure the model file is in the same directory as the app.")
             model_loaded = False
             return None
         
@@ -409,39 +415,28 @@ def main():
         st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
         st.markdown('<p class="description">Real-time face mask detection using a Keras model. The system detects faces and classifies whether they are wearing a mask or not.</p>', unsafe_allow_html=True)
         
-        # Load model and face detector
-        model = load_model()
-        load_face_detector()
-        
-        # Check if models loaded successfully
-        if not model_loaded or not face_detector_loaded:
-            st.error("Failed to load the model or face detector. Please check the files and try again.")
-            
-            # Additional debugging information
-            st.markdown("---")
-            st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
-            
-            st.write("**Current Directory:**", os.getcwd())
-            st.write("**Files in Directory:**")
-            for file in os.listdir():
-                if file.endswith(('.h5', '.keras')):
-                    st.write(f"- {file}")
-            
-            # Show system information
-            st.write("**System Information:**")
-            st.write(f"- Python Version: {sys.version}")
-            
-            # Check model file integrity
-            model_path = "mask_detection_model.h5"
-            if os.path.exists(model_path):
-                st.write(f"\n**Model File Information:**")
-                st.write(f"- File size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
-                st.write(f"- File exists: Yes")
-            
-            return
-        
         # Sidebar
         with st.sidebar:
+            st.markdown('<h3 class="sidebar-title">📁 Model Upload</h3>', unsafe_allow_html=True)
+            
+            # Check if model file exists
+            model_path = "mask_detection_model.h5"
+            if not os.path.exists(model_path):
+                st.info("Model file not found. Please upload the model file.")
+                uploaded_file = st.file_uploader("Upload Keras Model (.h5)", type=["h5"])
+                
+                if uploaded_file is not None:
+                    # Save the uploaded file
+                    with open(model_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    st.success("Model file uploaded successfully!")
+                    st.rerun()  # Rerun the app to load the model
+            else:
+                st.success("Model file found!")
+                st.write(f"File: {model_path}")
+                st.write(f"Size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
+            
+            st.markdown("---")
             st.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
             
             # Video size selection
@@ -501,8 +496,29 @@ def main():
                 help="Parameter specifying how many neighbors each candidate rectangle should have to retain it"
             )
         
-        # Parse video size
-        width, height = map(int, video_size.split('x'))
+        # Load model and face detector
+        model = load_model()
+        load_face_detector()
+        
+        # Check if models loaded successfully
+        if not model_loaded or not face_detector_loaded:
+            st.error("Failed to load the model or face detector. Please check the files and try again.")
+            
+            # Additional debugging information
+            st.markdown("---")
+            st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
+            
+            st.write("**Current Directory:**", os.getcwd())
+            st.write("**Files in Directory:**")
+            for file in os.listdir():
+                if file.endswith(('.h5', '.keras')):
+                    st.write(f"- {file}")
+            
+            # Show system information
+            st.write("**System Information:**")
+            st.write(f"- Python Version: {sys.version}")
+            
+            return
         
         # Main content area
         col1, col2 = st.columns([2, 1])
