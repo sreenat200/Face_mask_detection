@@ -1,4 +1,4 @@
-tensorflow>=2.13.0
+
 opencv-python-headless>=4.8.0
 streamlit>=1.28.0
 av>=10.0.0
@@ -6,3 +6,4 @@ streamlit-webrtc>=0.44.0
 Pillow>=10.0.0
 huggingface-hub>=0.16.0
 numpy>=1.24.0
+
