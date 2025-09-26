@@ -1,288 +1,603 @@
-import streamlit as st
-import cv2
-import torch
-from torchvision import transforms
-from PIL import Image
-import numpy as np
-from huggingface_hub import PyTorchModelHubMixin, hf_hub_download
-import json
-from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, RTCConfiguration
-from tensorflow.keras.models import load_model
-from tensorflow.keras.losses import MeanSquaredError, BinaryCrossentropy
-from tensorflow.keras.metrics import MeanAbsoluteError, Accuracy
-from collections import deque
-from io import BytesIO
 import os
+import cv2
+import streamlit as st
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+import tensorflow as tf
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
+import av
+import time
+from typing import Tuple, List, Dict, Any
+import h5py
+from huggingface_hub import hf_hub_download
 
-# Face Mask Detection Model
-class MaskDetectionCNN(torch.nn.Module, PyTorchModelHubMixin):
-    def __init__(self, num_classes=2, in_channels=3):
-        super(MaskDetectionCNN, self).__init__()
-        self.features = torch.nn.Sequential(
-            torch.nn.Conv2d(in_channels, 32, 3, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(2, 2),
-            torch.nn.Conv2d(32, 64, 3, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(2, 2),
-            torch.nn.Conv2d(64, 128, 3, padding=1),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(2, 2)
-        )
-        self.classifier = torch.nn.Sequential(
-            torch.nn.Dropout(0.5),
-            torch.nn.Linear(128 * 6 * 6, 256),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(0.5),
-            torch.nn.Linear(256, num_classes)
-        )
+# Force OpenCV to use headless backend
+os.environ["OPENCV_HEADLESS"] = "1"
+os.environ["QT_QPA_PLATFORM"] = "offscreen"
+cv2.ocl.setUseOpenCL(False)
 
-    def forward(self, x):
-        x = self.features(x)
-        x = x.view(x.size(0), -1)
-        x = self.classifier(x)
-        return x
+# Set TensorFlow to use CPU only
+tf.config.set_visible_devices([], 'GPU')
 
-def get_transform(in_channels):
-    return transforms.Compose([
-        transforms.Resize((48, 48)),
-        transforms.ToTensor(),
-        transforms.Normalize((0.5,) * in_channels, (0.5,) * in_channels)
-    ])
+# Set page config with transparent background
+st.set_page_config(
+    page_title="Face Mask Detection",
+    page_icon="😷",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Define labels for mask detection
-mask_labels = ['Mask', 'No Mask']
+# Custom CSS for modern styling with transparent background
+st.markdown("""
+    <style>
+        /* Main app background */
+        .main {
+            background-color: #121212;
+        }
+        
+        /* Sidebar background */
+        .css-1d391kg {
+            background-color: #1e1e1e;
+        }
+        
+        /* Headers */
+        .main-header {
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: #ffffff;
+            margin-bottom: 1rem;
+        }
+        .description {
+            font-size: 1.1rem;
+            color: #b0b0b0;
+            margin-bottom: 2rem;
+        }
+        .sidebar-title {
+            font-size: 1.3rem;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 1rem;
+        }
+        
+        /* Video container */
+        .video-container {
+            border-radius: 1rem;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -2px rgba(0, 0, 0, 0.2);
+            overflow: hidden;
+            background-color: #1e1e1e;
+            padding: 1rem;
+            border: 1px solid #333333;
+        }
+        
+        /* Buttons and sliders */
+        .stButton button {
+            background-color: #4a4a4a;
+            color: white;
+            border: none;
+            border-radius: 0.5rem;
+            padding: 0.5rem 1rem;
+            font-weight: 600;
+        }
+        .stButton button:hover {
+            background-color: #5a5a5a;
+        }
+        
+        /* Info box */
+        .element-container .stAlert {
+            background-color: #2a2a2a;
+            color: #e0e0e0;
+            border-radius: 0.5rem;
+            border-left: 4px solid #4a4a4a;
+        }
+        
+        /* Legend cards */
+        .legend-card {
+            background-color: #2a2a2a;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-bottom: 1rem;
+            border-left: 4px solid;
+        }
+        
+        /* Streamlit widgets */
+        .stSelectbox, .stSlider {
+            color: white;
+        }
+        .css-1d391kg p {
+            color: #b0b0b0;
+        }
+        .css-1d391kg label {
+            color: #e0e0e0;
+        }
+        
+        /* Footer */
+        footer {
+            color: #b0b0b0;
+            margin-top: 2rem;
+            padding-top: 1rem;
+            border-top: 1px solid #333333;
+        }
+        
+        /* System info section */
+        .system-info {
+            background-color: #1e1e1e;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin-top: 1rem;
+            border: 1px solid #333333;
+            font-size: 0.8rem;
+            color: #888;
+        }
+        .system-info h3 {
+            color: #aaa;
+            margin-top: 0;
+            margin-bottom: 0.5rem;
+            font-size: 1rem;
+        }
+        .system-info p {
+            margin: 0.2rem 0;
+        }
+        
+        /* Error details */
+        .error-details {
+            background-color: #2a1a1a;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            margin: 1rem 0;
+            border: 1px solid #664444;
+            font-family: monospace;
+            font-size: 0.9rem;
+            color: #ff9999;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+    </style>
+""", unsafe_allow_html=True)
 
-st.markdown("<h3>Live Face Mask Detection</h3>", unsafe_allow_html=True)
+# Global variables for model and processor
+model = None
+face_cascade = None
+model_input_size = (128, 128)  # From model config
+class_names = ['Mask', 'No Mask']  # From model config
+model_loaded = False
+face_detector_loaded = False
 
-with st.sidebar:
-    st.header("Settings")
-    model_option = st.selectbox(
-        "Select Model",
-        ["Model 1", "Model 2"],
-        index=0
-    )
-    mode = st.selectbox("Select Mode", ["Video Mode", "Snap Mode"], index=0)
-    if mode == "Video Mode":
-        quality = st.selectbox("Select Video Quality", ["Low (480p)", "Medium (720p)", "High (1080p)"], index=1)
-        fps = st.selectbox("Select FPS", [15, 30, 60], index=1)
-        mirror_feed = st.checkbox("Mirror Video Feed", value=True)
-    else:
-        mirror_snap = st.checkbox("Mirror Snap Image", value=True)
-
-quality_map = {
-    "High (1080p)": {"width": 1920, "height": 1080},
-    "Low (480p)": {"width": 854, "height": 480},
-    "Medium (720p)": {"width": 1280, "height": 720}
-}
-
-@st.cache_resource
-def load_mask_detection_model():
-    try:
-        config_path = hf_hub_download(repo_id="sreenathsree1578/face_mask_detection", filename="config.json")
-        with open(config_path) as f:
-            config = json.load(f)
-        num_classes = config.get("num_classes", 2)
-        model = MaskDetectionCNN(num_classes=num_classes, in_channels=3)
-        model = model.from_pretrained("sreenathsree1578/face_mask_detection")
-        model.eval()
-        return model, 3
-    except Exception as e:
-        with st.sidebar:
-            st.warning(f"Error loading face_mask_detection: {str(e)}. Using default.")
-        return MaskDetectionCNN(num_classes=2, in_channels=3), 3
-
-# Load model
-model, in_channels = load_mask_detection_model()
-transform_live = get_transform(in_channels)
-
-mask_colors = {
-    'Mask': (0, 255, 0),      # Green
-    'No Mask': (255, 0, 0)    # Red
-}
-
-def process_single_image(img, mirror=False):
-    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-    
-    if mirror:
-        img = cv2.flip(img, 1)
-    
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-
-    mask_status = None
-    
-    if len(faces) == 0:
-        return img, mask_status
-
-    for (x, y, w, h) in faces:
-        # Mask detection
-        face_mask = img[y:y+h, x:x+w]
-        face_mask = cv2.resize(face_mask, (48, 48))
-        face_mask_rgb = cv2.cvtColor(face_mask, cv2.COLOR_BGR2RGB)
-        face_mask_pil = Image.fromarray(face_mask_rgb, mode='RGB')
-        face_mask_tensor = transform_live(face_mask_pil).unsqueeze(0)
+def load_model() -> Any:
+    """Load the Keras face mask detection model from Hugging Face with enhanced error handling."""
+    global model, model_loaded
+    if model is None:
+        model_filename = "mask_detection_model.h5"
+        repo_id = "sreenathsree1578/face_mask_detection"
+        
         try:
-            with torch.no_grad():
-                output_mask = model(face_mask_tensor)
-                _, pred_mask = torch.max(output_mask, 1)
-                mask_status = mask_labels[pred_mask.item()] if pred_mask.item() < len(mask_labels) else "unknown"
+            # Download model from Hugging Face Hub
+            with st.spinner("Downloading model from Hugging Face Hub..."):
+                model_path = hf_hub_download(repo_id=repo_id, filename=model_filename)
+            
+            # Try loading with different methods
+            # Method 1: Standard Keras load
+            try:
+                model = tf.keras.models.load_model(model_path)
+                model_loaded = True
+                return model
+            except Exception as e1:
+                # Method 2: Try with custom objects
+                try:
+                    model = tf.keras.models.load_model(model_path, compile=False)
+                    model_loaded = True
+                    return model
+                except Exception as e2:
+                    # Method 3: Try loading as SavedModel if it's actually a directory
+                    try:
+                        if os.path.isdir(model_path):
+                            model = tf.keras.models.load_model(model_path)
+                            model_loaded = True
+                            return model
+                    except Exception as e3:
+                        pass
+            
+            # If all methods failed
+            model_loaded = False
+            return None
+            
         except Exception as e:
-            with st.sidebar:
-                st.warning(f"Mask prediction failed: {str(e)}. Input shape: {face_mask_tensor.shape}")
-            mask_status = "unknown"
+            st.error(f"Error loading model from Hugging Face: {str(e)}")
+            model_loaded = False
+            return None
+    return model
 
-        # Draw annotations on the image
-        cv2.rectangle(img, (x, y), (x+w, y+h), (255, 255, 255), 2)
-        mask_color = mask_colors.get(mask_status, (255, 0, 0))
-        text_size_mask = cv2.getTextSize(mask_status, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-        cv2.rectangle(img, (x, y-30), (x+text_size_mask[0], y), (255, 255, 255), -1)
-        cv2.putText(img, mask_status, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, mask_color, 2)
-
-    return img, mask_status
-
-if mode == "Video Mode":
-    resolution = quality_map[quality]
-
-    class MaskProcessor(VideoProcessorBase):
-        def __init__(self, mirror=False):
-            self.face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
-            self.mirror = mirror
-            self.no_face_count = 0
-            self.frame_count = 0
-            self.last_mask_status = "unknown"
-
-        def recv(self, frame):
-            self.frame_count += 1
-            img = frame.to_ndarray(format="bgr24")
+def load_face_detector():
+    """Load OpenCV's Haar cascade for face detection."""
+    global face_cascade, face_detector_loaded
+    if face_cascade is None:
+        try:
+            # Load the pre-trained Haar cascade classifier
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
             
-            if self.mirror:
-                img = cv2.flip(img, 1)
+            # Check if the cascade was loaded successfully
+            if face_cascade.empty():
+                face_detector_loaded = False
+                return False
             
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = self.face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            face_detector_loaded = True
+            return True
+        except Exception as e:
+            face_detector_loaded = False
+            return False
+    return True
 
-            if len(faces) == 0:
-                self.no_face_count += 1
-                if self.no_face_count % 30 == 0:
-                    with st.sidebar:
-                        st.warning("No faces detected in the frame.")
-                mask_status = self.last_mask_status
-            else:
-                self.no_face_count = 0
-                for (x, y, w, h) in faces:
-                    if self.frame_count % 3 == 0:
-                        face_mask = img[y:y+h, x:x+w]
-                        face_mask = cv2.resize(face_mask, (48, 48))
-                        face_mask_rgb = cv2.cvtColor(face_mask, cv2.COLOR_BGR2RGB)
-                        face_mask_pil = Image.fromarray(face_mask_rgb, mode='RGB')
-                        face_mask_tensor = transform_live(face_mask_pil).unsqueeze(0)
-                        try:
-                            with torch.no_grad():
-                                output_mask = model(face_mask_tensor)
-                                _, pred_mask = torch.max(output_mask, 1)
-                                mask_status = mask_labels[pred_mask.item()] if pred_mask.item() < len(mask_labels) else "unknown"
-                        except Exception as e:
-                            with st.sidebar:
-                                st.warning(f"Mask prediction failed: {str(e)}. Input shape: {face_mask_tensor.shape}")
-                            mask_status = "unknown"
+def preprocess_image(image: np.ndarray) -> np.ndarray:
+    """Preprocess image for model inference."""
+    # Resize to model input size
+    resized = cv2.resize(image, model_input_size)
+    # Normalize to [0,1]
+    normalized = resized.astype(np.float32) / 255.0
+    # Add batch dimension
+    return np.expand_dims(normalized, axis=0)
 
-                        self.last_mask_status = mask_status
-                    else:
-                        mask_status = self.last_mask_status
+def detect_faces(image: np.ndarray) -> List[Tuple[int, int, int, int]]:
+    """Detect faces in the image using Haar cascade."""
+    # Convert to grayscale for face detection
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    
+    # Detect faces
+    faces = face_cascade.detectMultiScale(
+        gray,
+        scaleFactor=1.1,
+        minNeighbors=5,
+        minSize=(30, 30),
+        flags=cv2.CASCADE_SCALE_IMAGE
+    )
+    
+    # Convert to list of tuples (x, y, w, h)
+    return [(x, y, w, h) for (x, y, w, h) in faces]
 
-                    cv2.rectangle(img, (x, y), (x+w, y+h), (255, 255, 255), 2)
-                    mask_color = mask_colors.get(mask_status, (255, 0, 0))
-                    text_size_mask = cv2.getTextSize(mask_status, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
-                    cv2.rectangle(img, (x, y-30), (x+text_size_mask[0], y), (255, 255, 255), -1)
-                    cv2.putText(img, mask_status, (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, mask_color, 2)
+def classify_faces(image: np.ndarray, faces: List[Tuple[int, int, int, int]], confidence_threshold: float = 0.5) -> List[Dict]:
+    """Classify each detected face as mask or no mask."""
+    detections = []
+    
+    for (x, y, w, h) in faces:
+        # Extract face ROI
+        face_roi = image[y:y+h, x:x+w]
+        
+        # Skip if face ROI is empty
+        if face_roi.size == 0:
+            continue
+        
+        # Preprocess the face ROI
+        processed_face = preprocess_image(face_roi)
+        
+        # Classify the face
+        try:
+            predictions = model.predict(processed_face, verbose=0)
+            
+            # Get the class with the highest probability
+            class_id = np.argmax(predictions[0])
+            confidence = float(predictions[0][class_id])
+            
+            # Only add detection if confidence is above threshold
+            if confidence >= confidence_threshold:
+                detections.append({
+                    "label": class_names[class_id],
+                    "score": confidence,
+                    "box": {"xmin": x, "ymin": y, "xmax": x + w, "ymax": y + h}
+                })
+        except Exception as e:
+            st.warning(f"Error classifying face: {str(e)}")
+    
+    return detections
 
-            return frame.from_ndarray(img, format="bgr24")
-
-    rtc_config = RTCConfiguration({
-        "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-    })
-
+def draw_detections(image: np.ndarray, detections: List[Dict]) -> np.ndarray:
+    """
+    Draw bounding boxes and labels on the image.
+    
+    Args:
+        image: Input image as numpy array
+        detections: List of detection dictionaries
+        
+    Returns:
+        Annotated image as numpy array
+    """
+    # Convert numpy array to PIL Image
+    pil_image = Image.fromarray(image)
+    draw = ImageDraw.Draw(pil_image)
+    
+    # Try to load a font, fall back to default if not available
     try:
-        webrtc_streamer(
-            key="mask-detection",
-            video_processor_factory=lambda: MaskProcessor(mirror=mirror_feed),
+        font = ImageFont.truetype("arial.ttf", 16)
+    except:
+        font = ImageFont.load_default()
+    
+    # Define colors for different classes
+    colors = {
+        "Mask": (0, 255, 0),      # Green
+        "No Mask": (255, 0, 0),   # Red
+    }
+    
+    for detection in detections:
+        try:
+            # Get bounding box coordinates
+            box = detection["box"]
+            xmin, ymin, xmax, ymax = box["xmin"], box["ymin"], box["xmax"], box["ymax"]
+            
+            # Get label and confidence
+            label = detection["label"]
+            confidence = detection["score"]
+            
+            # Get color based on label
+            color = colors.get(label, (0, 0, 255))  # Default to blue if label not found
+            
+            # Draw bounding box
+            draw.rectangle([(xmin, ymin), (xmax, ymax)], outline=color, width=3)
+            
+            # Create label text with confidence
+            label_text = f"{label}: {confidence:.2%}"
+            
+            # Get text size
+            text_bbox = draw.textbbox((0, 0), label_text, font=font)
+            text_width = text_bbox[2] - text_bbox[0]
+            text_height = text_bbox[3] - text_bbox[1]
+            
+            # Draw filled rectangle for text background
+            draw.rectangle(
+                [(xmin, ymin - text_height - 5), (xmin + text_width + 10, ymin - 5)],
+                fill=color
+            )
+            
+            # Draw text
+            draw.text((xmin + 5, ymin - text_height - 5), label_text, fill="white", font=font)
+        except Exception as e:
+            st.warning(f"Error drawing detection: {str(e)}")
+    
+    # Convert back to numpy array
+    return np.array(pil_image)
+
+class FaceMaskProcessor(VideoProcessorBase):
+    """Video processor class for real-time face mask detection."""
+    
+    def __init__(self, model: Any, target_size: Tuple[int, int] = (640, 480), 
+                 confidence_threshold: float = 0.5, mirror: bool = False):
+        self.model = model
+        self.target_size = target_size
+        self.confidence_threshold = confidence_threshold
+        self.mirror = mirror
+        self.frame_count = 0
+        self.processing_times = []
+        
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        """Process incoming video frame."""
+        start_time = time.time()
+        
+        # Convert frame to numpy array
+        img = frame.to_ndarray(format="bgr24")
+        
+        # Mirror the image if requested
+        if self.mirror:
+            img = cv2.flip(img, 1)
+        
+        # Resize frame if needed
+        if img.shape[:2][::-1] != self.target_size:
+            img = cv2.resize(img, self.target_size)
+        
+        # Detect faces
+        faces = detect_faces(img)
+        
+        # Classify each detected face
+        detections = classify_faces(img, faces, self.confidence_threshold)
+        
+        # Draw detections on frame
+        annotated_img = draw_detections(img, detections)
+        
+        # Calculate processing time
+        processing_time = time.time() - start_time
+        self.processing_times.append(processing_time)
+        if len(self.processing_times) > 30:  # Keep last 30 measurements
+            self.processing_times.pop(0)
+        
+        self.frame_count += 1
+        
+        # Convert back to VideoFrame
+        return av.VideoFrame.from_ndarray(annotated_img, format="bgr24")
+    
+    def get_average_fps(self) -> float:
+        """Calculate average FPS based on processing times."""
+        if not self.processing_times:
+            return 0.0
+        avg_time = sum(self.processing_times) / len(self.processing_times)
+        return 1.0 / avg_time if avg_time > 0 else 0.0
+
+def main():
+    """Main function to run the Streamlit app."""
+    # Header
+    st.markdown('<h1 class="main-header">😷 Face Mask Detection</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="description">Real-time face mask detection using a Keras model. The system detects faces and classifies whether they are wearing a mask or not.</p>', unsafe_allow_html=True)
+    
+    # Load model and face detector
+    model = load_model()
+    load_face_detector()
+    
+    # Check if models loaded successfully
+    if not model_loaded or not face_detector_loaded:
+        st.error("Failed to load the model or face detector. Please check the files and try again.")
+        
+        # Additional debugging information
+        st.markdown("---")
+        st.markdown('<h3 class="sidebar-title">🔍 Debugging Information</h3>', unsafe_allow_html=True)
+        
+        st.write("**Current Directory:**", os.getcwd())
+        st.write("**Files in Directory:**")
+        for file in os.listdir():
+            if file.endswith(('.h5', '.keras')):
+                st.write(f"- {file}")
+        
+        # Show system information
+        st.write("**System Information:**")
+        st.write(f"- Python Version: {os.sys.version}")
+        st.write(f"- TensorFlow Version: {tf.__version__}")
+        st.write(f"- OpenCV Version: {cv2.__version__}")
+        
+        # Check model file integrity
+        model_path = "mask_detection_model.h5"
+        if os.path.exists(model_path):
+            st.write(f"\n**Model File Information:**")
+            st.write(f"- File size: {os.path.getsize(model_path) / (1024*1024):.2f} MB")
+            st.write(f"- File exists: Yes")
+            
+            # Try to read the file as HDF5
+            try:
+                with h5py.File(model_path, 'r') as f:
+                    st.write(f"- HDF5 file: Valid")
+                    st.write(f"- Root keys: {list(f.keys())}")
+            except Exception as e:
+                st.write(f"- HDF5 file: Invalid - {str(e)}")
+        
+        return
+    
+    # Sidebar
+    with st.sidebar:
+        st.markdown('<h3 class="sidebar-title">🎛️ Settings</h3>', unsafe_allow_html=True)
+        
+        # Video size selection
+        video_size = st.selectbox(
+            "Video Size",
+            options=["640x480", "1280x720", "1920x1080"],
+            index=0,
+            help="Select the resolution for the video stream"
+        )
+        
+        # FPS selection
+        fps = st.slider(
+            "Frames Per Second (FPS)",
+            min_value=5,
+            max_value=30,
+            value=15,
+            step=1,
+            help="Adjust the frame rate for video processing"
+        )
+        
+        # Mirror video option
+        mirror_video = st.checkbox(
+            "Mirror Video",
+            value=False,
+            help="Flip the video horizontally"
+        )
+        
+        # Confidence threshold
+        confidence_threshold = st.slider(
+            "Confidence Threshold",
+            min_value=0.1,
+            max_value=0.9,
+            value=0.5,
+            step=0.05,
+            help="Minimum confidence score for detections"
+        )
+        
+        # Face detection parameters
+        st.markdown("---")
+        st.markdown('<h3 class="sidebar-title">🔍 Face Detection</h3>', unsafe_allow_html=True)
+        
+        scale_factor = st.slider(
+            "Scale Factor",
+            min_value=1.01,
+            max_value=1.5,
+            value=1.1,
+            step=0.01,
+            help="Parameter specifying how much the image size is reduced at each image scale"
+        )
+        
+        min_neighbors = st.slider(
+            "Min Neighbors",
+            min_value=1,
+            max_value=10,
+            value=5,
+            step=1,
+            help="Parameter specifying how many neighbors each candidate rectangle should have to retain it"
+        )
+    
+    # Parse video size
+    width, height = map(int, video_size.split('x'))
+    
+    # Main content area
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        st.markdown('<div class="video-container">', unsafe_allow_html=True)
+        
+        # WebRTC streamer
+        webrtc_ctx = webrtc_streamer(
+            key="face-mask-detection",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=lambda: FaceMaskProcessor(
+                model, (width, height), confidence_threshold, mirror_video
+            ),
             media_stream_constraints={
                 "video": {
-                    "width": {"ideal": resolution["width"]},
-                    "height": {"ideal": resolution["height"]},
-                    "frameRate": {"ideal": fps},
-                    "deviceId": {"exact": 1}
+                    "width": {"ideal": width},
+                    "height": {"ideal": height},
+                    "frameRate": {"ideal": fps}
                 },
                 "audio": False
             },
             async_processing=True,
-            rtc_configuration=rtc_config
         )
-    except Exception as e:
-        with st.sidebar:
-            if "OverconstrainedError" in str(e):
-                st.warning("Please select a device to continue.")
-            else:
-                st.warning(f"Camera 1 failed: {str(e)}. Switching to camera 0.")
-                try:
-                    webrtc_streamer(
-                        key="mask-detection-fallback",
-                        video_processor_factory=lambda: MaskProcessor(mirror=mirror_feed),
-                        media_stream_constraints={
-                            "video": {
-                                "width": {"ideal": resolution["width"]},
-                                "height": {"ideal": resolution["height"]},
-                                "frameRate": {"ideal": fps},
-                                "deviceId": {"exact": 0}
-                            },
-                            "audio": False
-                        },
-                        async_processing=True,
-                        rtc_configuration=rtc_config
-                    )
-                except Exception as e2:
-                    if "OverconstrainedError" in str(e2):
-                        st.warning("Please select a device to continue.")
-                    else:
-                        st.error(f"Camera 0 failed: {str(e2)}.")
-else:
-    st.header("Snap Mode")
-    if mirror_snap:
-        st.markdown(
-            """
-            <style>
-            video {
-                transform: scaleX(-1);
-            }
-            </style>
-            """,
-            unsafe_allow_html=True
-        )
-    image = st.camera_input("Take a photo")
-    if image is not None:
-        image_pil = Image.open(BytesIO(image.getvalue()))
-        img_rgb = np.array(image_pil)
-        img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-        processed_img, mask_status = process_single_image(img_bgr, mirror=mirror_snap)
         
-        if mask_status is None:
-            with st.sidebar:
-                st.warning("No faces detected in the photo.")
-            st.markdown("<h4 style='color: red; text-align: center;'>No face detected in the photo.</h4>", unsafe_allow_html=True)
-            st.image(processed_img, channels="BGR", caption="Processed Image")
-        else:
-            # Display results in a consistent format
-            col1, col2 = st.columns([1, 2])
+        st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Instructions
+        st.info("""
+            **Instructions:**
+            1. Click "START" to begin video streaming
+            2. Allow camera access when prompted
+            3. The system will detect faces and classify mask usage in real-time
+            4. Green boxes = With mask, Red boxes = Without mask
+        """)
+    
+    with col2:
+        st.markdown('<h3 class="sidebar-title">🎯 Detection Legend</h3>', unsafe_allow_html=True)
+        
+        # Create legend cards
+        st.markdown("""
+            <div class="legend-card" style="border-color: #22c55e;">
+                <div style="display: flex; align-items: center;">
+                    <div style="width: 20px; height: 20px; background-color: #22c55e; margin-right: 10px; border-radius: 4px;"></div>
+                    <strong>Mask</strong>
+                </div>
+                <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is wearing a mask</p>
+            </div>
             
-            with col1:
-                st.subheader("Detection Results")
-                
-                # Mask status display
-                mask_rgb = mask_colors.get(mask_status, (255, 0, 0))
-                mask_display = mask_status if mask_status is not None else "unknown"
-                st.markdown(f"**Mask Status**: <span style='color: #{mask_rgb[0]:02x}{mask_rgb[1]:02x}{mask_rgb[2]:02x}; font-size: 20px'>{mask_display}</span>", 
-                           unsafe_allow_html=True)
-            
-            with col2:
-                st.image(processed_img, channels="BGR", caption="Processed Image")
+            <div class="legend-card" style="border-color: #ef4444;">
+                <div style="display: flex; align-items: center;">
+                    <div style="width: 20px; height: 20px; background-color: #ef4444; margin-right: 10px; border-radius: 4px;"></div>
+                    <strong>No Mask</strong>
+                </div>
+                <p style="margin: 0.5rem 0 0 0; color: #b0b0b0; font-size: 0.9rem;">Person is not wearing a mask</p>
+            </div>
+        """, unsafe_allow_html=True)
+    
+    # System information at the bottom
+    st.markdown("---")
+    st.markdown("""
+        <div class="system-info">
+            <h3>System Information</h3>
+            <p>TensorFlow Version: {tf_version}</p>
+            <p>Model: {model_name} (Loaded from Hugging Face)</p>
+            <p>Face Detector: {detector_status}</p>
+            <p>Device: CPU</p>
+        </div>
+    """.format(
+        tf_version=tf.__version__,
+        model_name="mask_detection_model.h5",
+        detector_status="Loaded" if face_detector_loaded else "Failed to load"
+    ), unsafe_allow_html=True)
+    
+    # Footer
+    st.markdown(
+        '<footer style="text-align: center; color: #b0b0b0; font-size: 0.9rem;">'
+        'Built with ❤️ using Streamlit, TensorFlow, and OpenCV'
+        '</footer>', 
+        unsafe_allow_html=True
+    )
+
+if __name__ == "__main__":
+    main()
