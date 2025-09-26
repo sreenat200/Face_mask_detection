@@ -1,5 +1,6 @@
-import streamlit as st
+import os
 import cv2
+import streamlit as st
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import tensorflow as tf
@@ -7,9 +8,15 @@ from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, WebRtcMode
 import av
 import time
 from typing import Tuple, List, Dict, Any
-import os
 import h5py
 from huggingface_hub import hf_hub_download
+
+# Force OpenCV to use headless backend
+os.environ["OPENCV_HEADLESS"] = "1"
+cv2.ocl.setUseOpenCL(False)
+
+# Set TensorFlow to use CPU only
+tf.config.set_visible_devices([], 'GPU')
 
 # Set page config with transparent background
 st.set_page_config(
@@ -18,9 +25,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Set TensorFlow to use CPU only
-tf.config.set_visible_devices([], 'GPU')
 
 # Custom CSS for modern styling with transparent background
 st.markdown("""
